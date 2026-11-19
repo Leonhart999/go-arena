@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>go-arena · play Go engines against each other</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>go-arena</h1>
+    <span id="role-badge" class="badge">local</span>
+    <span class="spacer"></span>
+    <a href="https://github.com/Leonhart999/go-arena#readme" target="_blank" rel="noopener">How to connect an engine</a>
+  </header>
+
+  <main class="layout">
+    <section class="board-col">
+      <div class="players">
+        <div class="player" id="pl-black">
+          <span class="dot dot-b"></span>
+          <div class="pl-text">
+            <div class="pl-name" id="black-name">Black</div>
+            <div class="pl-meta" id="black-meta"></div>
+          </div>
+        </div>
+        <div class="player" id="pl-white">
+          <span class="dot dot-w"></span>
+          <div class="pl-text">
+            <div class="pl-name" id="white-name">White</div>
+            <div class="pl-meta" id="white-meta"></div>
+          </div>
+        </div>
+      </div>
+      <div id="board" class="board-wrap"></div>
+      <div class="board-bar">
+        <span id="status-line">Idle</span>
+        <span class="spacer"></span>
+        <span id="human-controls" hidden>
+          <button id="btn-pass">Pass</button>
+          <button id="btn-resign" class="danger">Resign</button>
+        </span>
+      </div>
+      <div id="review-bar" class="review-bar" hidden>
+        <span id="review-title"></span>
+        <input id="review-slider" type="range" min="0" max="0" value="0">
+        <span id="review-move"></span>
+        <button id="review-sgf">SGF</button>
+        <button id="review-close">Back to live</button>
+      </div>
+    </section>
+
+    <aside class="side">
+      <details class="card" id="card-me" open>
+        <summary>1. My player</summary>
+        <div class="row">
+          <label for="my-name">Name</label>
+          <input id="my-name" data-persist maxlength="40" placeholder="Your name">
+        </div>
+        <div class="row">
+          <label for="my-kind">Plays as</label>
+          <select id="my-kind" data-persist>
+            <option value="engine">Engine on this computer (via bridge)</option>
+            <option value="human">Me, clicking on the board</option>
+          </select>
+        </div>
+        <div id="my-engine-box">
+          <div class="row">
+            <label for="my-url">Bridge</label>
+            <input id="my-url" data-persist value="ws://127.0.0.1:8765" spellcheck="false">
+            <button id="my-connect">Connect</button>
+          </div>
+          <div class="hint" id="my-status">Not connected. Start <code>bridge/gtp_bridge.py</code> first.</div>
+        </div>
+      </details>
+
+      <details class="card" id="card-room" open>
+        <summary>2. Room</summary>
+        <div id="room-idle">
+          <div class="row">
+            <button id="room-create" class="primary">Create room</button>
+            <span class="hint">You host: your engine is seat A and the match runs in this tab.</span>
+          </div>
+          <div class="row">
+            <input id="join-code" placeholder="room code" spellcheck="false" maxlength="40">
+            <label class="check"><input type="checkbox" id="join-watch"> watch only</label>
+            <button id="room-join">Join</button>
+          </div>
+        </div>
+        <div id="room-active" hidden>
+          <div class="row">
+            <span>Room <b id="room-code"></b></span>
+            <button id="room-copy">Copy invite link</button>
+            <button id="room-leave" class="danger">Leave</button>
+          </div>
+          <div class="hint" id="room-status"></div>
+          <ul id="room-peers" class="peers"></ul>
+        </div>
+        <details class="advanced">
+          <summary>Network settings</summary>
+          <div class="row">
+            <label for="net-signal">Signaling</label>
+            <input id="net-signal" data-persist placeholder="default: PeerJS cloud (0.peerjs.com)" spellcheck="false">
+          </div>
+          <label for="net-ice" class="block">ICE servers (JSON, empty = built-in STUN + PeerJS TURN)</label>
+          <textarea id="net-ice" data-persist rows="4" spellcheck="false" placeholder='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'></textarea>
+          <div class="hint">Both sides must use the same signaling server. A custom one is added to the invite link.</div>
+        </details>
+      </details>
+
+      <details class="card host-only" id="card-match" open>
+        <summary>3. Match</summary>
+        <div class="row">
+          <label for="b-kind">Seat B</label>
+          <select id="b-kind" data-persist>
+            <option value="remote">Room guest</option>
+            <option value="engine">Second engine on this computer</option>
+            <option value="human">Human on this page</option>
+          </select>
+        </div>
+        <div id="b-engine-box" hidden>
+          <div class="row">
+            <label for="b-url">Bridge B</label>
+            <input id="b-url" data-persist value="ws://127.0.0.1:8766" spellcheck="false">
+            <button id="b-connect">Connect</button>
+          </div>
+          <div class="hint" id="b-status">Not connected.</div>
+        </div>
+        <div class="hint" id="b-remote-status"></div>
+        <div class="grid">
+          <label>Board <select id="cfg-size" data-persist>
+            <option value="19">19x19</option><option value="13">13x13</option><option value="9">9x9</option>
+          </select></label>
+          <label>Komi <input id="cfg-komi" data-persist type="number" step="0.5" value="7.5"></label>
+          <label>Ko rule <select id="cfg-ko" data-persist>
+            <option value="positional">positional superko</option>
+            <option value="situational">situational superko</option>
+            <option value="simple">simple ko</option>
+          </select></label>
+          <label>Games <input id="cfg-games" data-persist type="number" min="1" max="1000" value="10"></label>
+          <label>Sec / move <input id="cfg-time" data-persist type="number" min="0" step="0.5" value="10" title="0 = unlimited; engines that exceed it lose on time"></label>
+          <label>Max moves <input id="cfg-maxmoves" data-persist type="number" min="0" value="0" title="0 = 2 x board points; then scored as is"></label>
+          <label>Delay ms <input id="cfg-delay" data-persist type="number" min="0" step="100" value="0" title="pause after each move, for watching"></label>
+          <label class="check"><input type="checkbox" id="cfg-alternate" data-persist checked> alternate colors</label>
+        </div>
+        <div class="row">
+          <label for="ref-url">Referee</label>
+          <input id="ref-url" data-persist placeholder="optional bridge for final_score" spellcheck="false">
+          <button id="ref-connect">Connect</button>
+        </div>
+        <div class="hint" id="ref-status">Without a referee, finished games are scored by Tromp-Taylor area counting (dead stones must be captured).</div>
+        <div class="row buttons">
+          <button id="m-start" class="primary">Start match</button>
+          <button id="m-pause">Pause</button>
+          <button id="m-resume">Resume</button>
+          <button id="m-stop" class="danger">Stop</button>
+        </div>
+      </details>
+
+      <section class="card" id="card-results">
+        <h2>Results</h2>
+        <div id="summary" class="summary">No games yet.</div>
+        <div class="table-wrap">
+          <table id="results-table">
+            <thead><tr><th>#</th><th>Black</th><th>White</th><th>Result</th><th>Moves</th><th>Reason</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="row buttons">
+          <button id="exp-sgf">All games (SGF)</button>
+          <button id="exp-csv">CSV</button>
+          <button id="exp-json">JSON</button>
+          <button id="res-clear" class="host-only danger">Clear</button>
+        </div>
+      </section>
+
+      <details class="card" id="card-log">
+        <summary>Log</summary>
+        <pre id="log"></pre>
+      </details>
+    </aside>
+  </main>
+
+  <script src="vendor/peerjs.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
