@@ -29,6 +29,8 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
 .badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #e8e5de; color: var(--muted); }
 .badge.host { background: #dcebe2; color: var(--accent); }
 .badge.guest { background: #e3e6f3; color: #34428a; }
+.lang-btn { font-size: 12px; padding: 3px 10px; border-radius: 14px; font-weight: 600; color: var(--accent); border-color: #c5d6cc; background: #f3f7f5; }
+.lang-btn:hover:not(:disabled) { background: #e4eee9; }
 
 .layout {
   display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 20px;
@@ -80,7 +82,7 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
 .card > h2 { cursor: default; margin-bottom: 8px; }
 .card[open] > summary { margin-bottom: 8px; }
 .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
-.row > label:first-child { width: 64px; color: var(--muted); }
+.row > label:first-child { width: 72px; color: var(--muted); }
 .row input:not([type="checkbox"]), .row select { flex: 1; min-width: 0; }
 .row.buttons { margin-top: 10px; }
 .block { display: block; color: var(--muted); margin: 6px 0 4px; }

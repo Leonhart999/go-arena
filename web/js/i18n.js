@@ -1,0 +1,421 @@
+// Bilingual dictionary (English / Simplified Chinese) and DOM localization helper.
+
+export const LANG_KEY = "go-arena.lang";
+
+const DICT = {
+  en: {
+    pageTitle: "go-arena · play Go engines against each other",
+    docLink: "How to connect an engine",
+    docHref: "https://github.com/Leonhart999/go-arena#readme",
+    langToggle: "中文",
+    langToggleTitle: "Switch to Chinese",
+
+    blackDefault: "Black",
+    whiteDefault: "White",
+    statusIdle: "Idle",
+    btnPass: "Pass",
+    btnResign: "Resign",
+    btnSgf: "SGF",
+    btnBackLive: "Back to live",
+
+    cardMe: "1. My player",
+    lblName: "Name",
+    phMyName: "Your name",
+    lblPlaysAs: "Plays as",
+    optMyEngine: "Engine on this computer (via bridge)",
+    optMyHuman: "Me, clicking on the board",
+    lblBridge: "Bridge",
+    btnConnect: "Connect",
+    myStatusDefaultHtml: "Not connected. Start <code>bridge/gtp_bridge.py</code> first.",
+
+    cardRoom: "2. Room",
+    btnCreateRoom: "Create room",
+    createRoomHint: "You host: your engine is seat A and the match runs in this tab.",
+    phJoinCode: "room code",
+    chkWatchOnly: "watch only",
+    btnJoin: "Join",
+    roomPrefix: "Room ",
+    btnCopyInvite: "Copy invite link",
+    btnLeave: "Leave",
+    advNet: "Network settings",
+    lblSignal: "Signaling",
+    phSignal: "default: PeerJS cloud (0.peerjs.com)",
+    lblIce: "ICE servers (JSON, empty = built-in STUN + PeerJS TURN)",
+    netHint: "Both sides must use the same signaling server. A custom one is added to the invite link.",
+
+    cardMatch: "3. Match",
+    lblSeatB: "Seat B",
+    optBRemote: "Room guest",
+    optBEngine: "Second engine on this computer",
+    optBHuman: "Human on this page",
+    lblBridgeB: "Bridge B",
+    bStatusDefault: "Not connected.",
+    lblBoard: "Board",
+    lblKomi: "Komi",
+    lblKoRule: "Ko rule",
+    optKoPos: "positional superko",
+    optKoSit: "situational superko",
+    optKoSim: "simple ko",
+    lblGames: "Games",
+    lblTime: "Sec / move",
+    titleTime: "0 = unlimited; engines that exceed it lose on time",
+    lblMaxMoves: "Max moves",
+    titleMaxMoves: "0 = 2 x board points; then scored as is",
+    lblDelay: "Delay ms",
+    titleDelay: "pause after each move, for watching",
+    chkAlternate: "alternate colors",
+    lblReferee: "Referee",
+    phReferee: "optional bridge for final_score",
+    refStatusDefault: "Without a referee, finished games are scored by Tromp-Taylor area counting (dead stones must be captured).",
+    btnStart: "Start match",
+    btnPause: "Pause",
+    btnResume: "Resume",
+    btnStop: "Stop",
+
+    cardResults: "Results",
+    summaryEmpty: "No games yet.",
+    thGame: "#",
+    thBlack: "Black",
+    thWhite: "White",
+    thResult: "Result",
+    thMoves: "Moves",
+    thReason: "Reason",
+    btnExpSgf: "All games (SGF)",
+    btnExpCsv: "CSV",
+    btnExpJson: "JSON",
+    btnClear: "Clear",
+    cardLog: "Log",
+
+    // Dynamic strings
+    guestDefault: "Guest",
+    hostDefault: "Host",
+    humanSuffix: "human",
+    noEngineSuffix: "no engine",
+    localBName: "Local B",
+    waitingGuestLabel: "(waiting for a guest)",
+    engineBNotConn: "(engine B not connected)",
+    seatADefault: "Seat A",
+    seatBDefault: "Seat B",
+    captures: ({ n }) => `captures ${n}`,
+    thinking: ({ s }) => `thinking ${s}s`,
+
+    badgeLocal: "local",
+    badgeHost: ({ code }) => `host · room ${code}`,
+    badgeGuestSeat: ({ code }) => `guest · seat B · room ${code}`,
+    badgeWatching: ({ code }) => `watching room ${code}`,
+
+    statusReviewing: ({ game, result }) => `Reviewing game ${game}: ${result}`,
+    statusWaitingHost: "Waiting for the host ...",
+    statusStarting: "Starting ...",
+    statusGameHead: ({ game, prog }) => `Game ${game}${prog}`,
+    statusGameDone: ({ head, result, reason, tail }) => `${head}: ${result}, ${reason}${tail}`,
+    statusPausedTail: " · paused",
+    statusMatchOverTail: " · match over",
+    statusMove: ({ head, move, side, tail }) => `${head} · move ${move} · ${side} to play${tail}`,
+    statusPausingAfter: " · pausing after this move",
+    sideBlack: "Black",
+    sideWhite: "White",
+
+    seatBConnected: ({ label }) => `Seat B: ${label}`,
+    seatBWaiting: "Seat B: waiting for a guest to join the room.",
+    seatBInviteHint: "Seat B: create a room and send the invite link to your opponent.",
+
+    roomGuestsCount: ({ n }) => `${n} guest${n > 1 ? "s" : ""} connected.`,
+    roomShareHint: "Share the invite link. Guests connect directly to this tab.",
+    roomPeerLine: ({ label, role }) => `${label} · ${role === "player" ? "seat B" : role}`,
+    roomGuestSeatB: "You are seat B. Keep this tab open while the match runs.",
+    roomGuestWatching: "Watching.",
+
+    bridgeEnterUrl: "Enter the bridge address, e.g. ws://127.0.0.1:8765",
+    bridgeConnecting: ({ url }) => `Connecting to ${url} ...`,
+    bridgeWaitStart: "Connected, waiting for the engine to start ...",
+    bridgeConnected: ({ label, extra }) => `Connected: ${label}${extra}`,
+    bridgeNoScore: " (no final_score)",
+    bridgeDisconnected: "Bridge disconnected. Restart it and press Connect.",
+
+    summaryVoidOnly: "Only void games so far.",
+    summaryLineAB: ({ a, b, draws, games, voids }) =>
+      `A ${a} : ${b} B${draws ? ` (draws ${draws})` : ""} in ${games} games${voids ? `, ${voids} void` : ""}`,
+    summaryScore: ({ score, lo, hi }) => `A score ${score}, 95% CI ${lo} to ${hi}`,
+    summaryElo: ({ elo, lo, hi, los }) => `Elo A minus B ${elo} (95% CI ${lo} to ${hi}), LOS ${los}`,
+    summaryColors: ({ asB, asW, bWins, total }) => `A as Black ${asB}, as White ${asW} · Black won ${bWins} of ${total}`,
+    summaryTiming: ({ avgA, avgB, avgLen }) =>
+      `Avg time per move: A ${avgA}s, B ${avgB}s · avg length ${avgLen} moves`,
+
+    reviewTitle: ({ game, result }) => `Game ${game} · ${result}`,
+    reviewMove: ({ no, c, v, s }) => `${no}. ${c} ${v} (${s}s)`,
+    reviewStart: "start",
+    illegalMove: ({ v }) => `${v} is not a legal move.`,
+
+    confirmNewMatch: "Start a new match? The current results will be cleared (export them first if needed).",
+    confirmResign: "Resign this game?",
+    confirmClear: "Delete all results on this page?",
+    promptCopyInvite: "Copy the invite link:",
+
+    logSaveFail: "Could not save results in the browser (storage full?). Export them.",
+    logBridgeConnected: ({ url, label }) => `Bridge ${url}: ${label}`,
+    logBridgeLost: ({ url }) => `Bridge ${url} disconnected`,
+    logNeedSeatA: "Seat A: connect your engine first (or choose to play by hand).",
+    logNeedSeatB: "Seat B is empty: connect engine B or wait for a guest to join.",
+    logMatchDone: "Match finished.",
+    logMatchStart: ({ a, b, games }) => `Match started: ${a} vs ${b}, ${games} games`,
+    logMatchError: ({ msg }) => `Match error: ${msg}`,
+    logOpeningRoom: "Opening room ...",
+    logOpenRoomFail: ({ msg }) => `Could not open a room: ${msg}`,
+    logRoomOpen: ({ code }) => `Room ${code} is open.`,
+    logRoomErr: ({ msg }) => `Room: ${msg}`,
+    logPeerTimeout: ({ label }) => `${label} stopped answering; dropping`,
+    logPeerTakesB: ({ label }) => `${label} takes seat B`,
+    logPeerLeft: ({ label }) => `${label} left the room`,
+    logEnterCode: "Enter the room code from the invite link.",
+    logStopFirst: "Stop your own match before joining another room.",
+    logJoining: ({ code }) => `Joining room ${code} ...`,
+    logJoinFail: ({ msg }) => `Could not join: ${msg}`,
+    logHostClosed: "Connection to the host closed.",
+    logJoined: ({ code }) => `Joined room ${code}.`,
+    logWelcomeSeatB: ({ host }) => `You play seat B against ${host}.`,
+    logWelcomeWatch: ({ host }) => `Watching ${host}'s room.`,
+    logLeftRoom: "Left the room.",
+    logInviteRestored: ({ room }) => `Invite for room ${room}: set up your player, then press Join.`,
+    logRestoredGames: ({ n }) => `Restored ${n} game(s) from the last session.`,
+    logWaitGuestRejoin: "Seat B is empty: wait for the guest to rejoin.",
+    logInviteCopied: ({ link }) => `Invite link copied: ${link}`,
+    logNoGamesExport: "No finished games to export.",
+    logRebuildFail: ({ msg }) => `Cannot rebuild the position: ${msg}`,
+  },
+
+  zh: {
+    pageTitle: "go-arena · 围棋 AI 远程对战与评估平台",
+    docLink: "如何接入本地 AI",
+    docHref: "https://github.com/Leonhart999/go-arena/blob/main/docs/README_zh.md",
+    langToggle: "EN",
+    langToggleTitle: "Switch to English",
+
+    blackDefault: "黑方",
+    whiteDefault: "白方",
+    statusIdle: "空闲",
+    btnPass: "停一手",
+    btnResign: "认输",
+    btnSgf: "导出 SGF",
+    btnBackLive: "返回实时",
+
+    cardMe: "1. 我方选手",
+    lblName: "名称",
+    phMyName: "你的名称",
+    lblPlaysAs: "控制方式",
+    optMyEngine: "本机 AI 引擎（通过桥接脚本）",
+    optMyHuman: "我亲自落子（点击棋盘）",
+    lblBridge: "桥接地址",
+    btnConnect: "连接",
+    myStatusDefaultHtml: "未连接。请先在本地启动 <code>bridge/gtp_bridge.py</code>。",
+
+    cardRoom: "2. 联机房间",
+    btnCreateRoom: "创建房间",
+    createRoomHint: "你作为房主（座位 A），整个对局将在当前页面调度。",
+    phJoinCode: "输入房间号",
+    chkWatchOnly: "仅观战",
+    btnJoin: "加入",
+    roomPrefix: "房间 ",
+    btnCopyInvite: "复制邀请链接",
+    btnLeave: "离开房间",
+    advNet: "网络高级设置",
+    lblSignal: "信令服",
+    phSignal: "默认：PeerJS 云端 (0.peerjs.com)",
+    lblIce: "ICE 服务器（JSON 格式，留空则使用内置 STUN + PeerJS TURN）",
+    netHint: "双方必须使用同一个信令服务器；自定义地址会自动附带在邀请链接里。",
+
+    cardMatch: "3. 对局设置",
+    lblSeatB: "座位 B",
+    optBRemote: "房间受邀好友",
+    optBEngine: "本机第二个 AI 引擎",
+    optBHuman: "本页面人类棋手",
+    lblBridgeB: "桥接 B",
+    bStatusDefault: "未连接。",
+    lblBoard: "棋盘路数",
+    lblKomi: "贴目",
+    lblKoRule: "劫争规则",
+    optKoPos: "位置超级劫 (Positional)",
+    optKoSit: "情景超级劫 (Situational)",
+    optKoSim: "普通单劫 (Simple)",
+    lblGames: "总局数",
+    lblTime: "每步秒数",
+    titleTime: "0 = 不限时；超时引擎判负 (+T)",
+    lblMaxMoves: "最大手数",
+    titleMaxMoves: "0 = 2 倍棋盘交叉点数；达到后按当前局面数子",
+    lblDelay: "步间延迟 ms",
+    titleDelay: "每步棋后的停顿毫秒数，方便观战",
+    chkAlternate: "每局交换黑白",
+    lblReferee: "裁判引擎",
+    phReferee: "可选，连接桥接用于 final_score 数子",
+    refStatusDefault: "不接裁判引擎时，终局默认按 Tromp-Taylor 面积数子（需将死子提清）。",
+    btnStart: "开始比赛",
+    btnPause: "暂停",
+    btnResume: "继续",
+    btnStop: "停止",
+
+    cardResults: "战绩与统计",
+    summaryEmpty: "暂无对局记录。",
+    thGame: "局",
+    thBlack: "黑",
+    thWhite: "白",
+    thResult: "结果",
+    thMoves: "手数",
+    thReason: "终局原因",
+    btnExpSgf: "全部棋谱 (SGF)",
+    btnExpCsv: "导出 CSV",
+    btnExpJson: "导出 JSON",
+    btnClear: "清空",
+    cardLog: "运行日志",
+
+    guestDefault: "访客",
+    hostDefault: "房主",
+    humanSuffix: "人类",
+    noEngineSuffix: "未连接引擎",
+    localBName: "本机 B",
+    waitingGuestLabel: "（等待对手加入）",
+    engineBNotConn: "（引擎 B 未连接）",
+    seatADefault: "座位 A",
+    seatBDefault: "座位 B",
+    captures: ({ n }) => `提子 ${n}`,
+    thinking: ({ s }) => `思考中 ${s}s`,
+
+    badgeLocal: "本机模式",
+    badgeHost: ({ code }) => `房主 · 房间 ${code}`,
+    badgeGuestSeat: ({ code }) => `受邀方 · 座位 B · 房间 ${code}`,
+    badgeWatching: ({ code }) => `观战 · 房间 ${code}`,
+
+    statusReviewing: ({ game, result }) => `正在复盘第 ${game} 局：${result}`,
+    statusWaitingHost: "等待房主同步状态 ...",
+    statusStarting: "正在开局 ...",
+    statusGameHead: ({ game, prog }) => `第 ${game} 局${prog}`,
+    statusGameDone: ({ head, result, reason, tail }) => `${head}：${result}（${reason}）${tail}`,
+    statusPausedTail: " · 已暂停",
+    statusMatchOverTail: " · 比赛结束",
+    statusMove: ({ head, move, side, tail }) => `${head} · 第 ${move} 手 · 轮到${side}${tail}`,
+    statusPausingAfter: " · 本手结束后暂停",
+    sideBlack: "黑方",
+    sideWhite: "白方",
+
+    seatBConnected: ({ label }) => `座位 B：${label}`,
+    seatBWaiting: "座位 B：等待受邀方加入房间。",
+    seatBInviteHint: "座位 B：请先创建房间并将邀请链接发给对手。",
+
+    roomGuestsCount: ({ n }) => `当前有 ${n} 位在线访客。`,
+    roomShareHint: "将邀请链接发给朋友，对方浏览器会直接与你当前标签页 P2P 互联。",
+    roomPeerLine: ({ label, role }) => `${label} · ${role === "player" ? "座位 B" : "观战"}`,
+    roomGuestSeatB: "你当前为座位 B，比赛期间请保持本标签页打开。",
+    roomGuestWatching: "观战模式。",
+
+    bridgeEnterUrl: "请输入桥接地址，例如 ws://127.0.0.1:8765",
+    bridgeConnecting: ({ url }) => `正在连接 ${url} ...`,
+    bridgeWaitStart: "WebSocket 已连接，等待引擎启动 ...",
+    bridgeConnected: ({ label, extra }) => `已连接：${label}${extra}`,
+    bridgeNoScore: "（不支持 final_score）",
+    bridgeDisconnected: "桥接已断开，请重启本地脚本后重新点击连接。",
+
+    summaryVoidOnly: "目前仅有无效局（Void）。",
+    summaryLineAB: ({ a, b, draws, games, voids }) =>
+      `A ${a} : ${b} B${draws ? `（平局 ${draws}）` : ""}，共 ${games} 局${voids ? `，${voids} 局无效` : ""}`,
+    summaryScore: ({ score, lo, hi }) => `A 得分率 ${score}，95% 置信区间 ${lo} ~ ${hi}`,
+    summaryElo: ({ elo, lo, hi, los }) => `Elo 差值 (A - B) ${elo}（95% CI ${lo} ~ ${hi}），优胜概率 LOS ${los}`,
+    summaryColors: ({ asB, asW, bWins, total }) => `A 执黑 ${asB}、执白 ${asW} · 黑棋胜 ${bWins}/${total} 局`,
+    summaryTiming: ({ avgA, avgB, avgLen }) => `平均每手耗时：A ${avgA}s，B ${avgB}s · 平均手数 ${avgLen}`,
+
+    reviewTitle: ({ game, result }) => `第 ${game} 局 · ${result}`,
+    reviewMove: ({ no, c, v, s }) => `${no}. ${c} ${v} (${s}s)`,
+    reviewStart: "开局",
+    illegalMove: ({ v }) => `${v} 为非法着法。`,
+
+    confirmNewMatch: "确定开始新比赛？当前页面上的战绩将被清空（如有需要请先导出）。",
+    confirmResign: "确定认输本局吗？",
+    confirmClear: "确定清空当前页面的所有对局战绩吗？",
+    promptCopyInvite: "请复制以下邀请链接：",
+
+    logSaveFail: "浏览器本地存储已满，无法保存战绩，请及时导出。",
+    logBridgeConnected: ({ url, label }) => `桥接 ${url} 已连接：${label}`,
+    logBridgeLost: ({ url }) => `桥接 ${url} 已断开`,
+    logNeedSeatA: "座位 A 尚未就绪：请先连接己方引擎（或切换为人类落子）。",
+    logNeedSeatB: "座位 B 为空：请连接引擎 B 或等待朋友加入房间。",
+    logMatchDone: "比赛全部结束。",
+    logMatchStart: ({ a, b, games }) => `比赛开始：${a} vs ${b}，共 ${games} 局`,
+    logMatchError: ({ msg }) => `比赛出错：${msg}`,
+    logOpeningRoom: "正在创建房间 ...",
+    logOpenRoomFail: ({ msg }) => `创建房间失败：${msg}`,
+    logRoomOpen: ({ code }) => `房间 ${code} 已开启。`,
+    logRoomErr: ({ msg }) => `房间异常：${msg}`,
+    logPeerTimeout: ({ label }) => `${label} 心跳超时，已断开`,
+    logPeerTakesB: ({ label }) => `${label} 已就座 B 位`,
+    logPeerLeft: ({ label }) => `${label} 离开了房间`,
+    logEnterCode: "请输入邀请链接中的房间号。",
+    logStopFirst: "请先停止当前进行的比赛，再加入其他房间。",
+    logJoining: ({ code }) => `正在加入房间 ${code} ...`,
+    logJoinFail: ({ msg }) => `加入失败：${msg}`,
+    logHostClosed: "与房主的连接已断开。",
+    logJoined: ({ code }) => `已加入房间 ${code}。`,
+    logWelcomeSeatB: ({ host }) => `你已取得座位 B，对手为 ${host}。`,
+    logWelcomeWatch: ({ host }) => `正在观战 ${host} 的房间。`,
+    logLeftRoom: "已离开房间。",
+    logInviteRestored: ({ room }) => `已自动填入房间号 ${room}：请先连接好本地引擎，再点击「加入」。`,
+    logRestoredGames: ({ n }) => `已从上次会话恢复 ${n} 局战绩。`,
+    logWaitGuestRejoin: "座位 B 为空：请等待受邀方重新加入房间。",
+    logInviteCopied: ({ link }) => `邀请链接已复制：${link}`,
+    logNoGamesExport: "暂无可导出的有效对局。",
+    logRebuildFail: ({ msg }) => `无法重建棋盘局面：${msg}`,
+  },
+};
+
+export function detectLang(storage = globalThis.localStorage, nav = globalThis.navigator) {
+  try {
+    const saved = storage?.getItem(LANG_KEY);
+    if (saved === "zh" || saved === "en") return saved;
+  } catch {
+    // ignore storage errors
+  }
+  const sys = String(nav?.language || "").toLowerCase();
+  return sys.startsWith("zh") ? "zh" : "en";
+}
+
+export function getDict(lang) {
+  return DICT[lang === "zh" ? "zh" : "en"];
+}
+
+export function translate(lang, key, vars = {}) {
+  const dict = getDict(lang);
+  const val = dict[key] ?? DICT.en[key] ?? key;
+  return typeof val === "function" ? val(vars) : val;
+}
+
+export function applyDomTranslations(doc, lang) {
+  const dict = getDict(lang);
+  doc.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  doc.title = dict.pageTitle;
+  for (const el of doc.querySelectorAll("[data-i18n]")) {
+    const key = el.dataset.i18n;
+    if (key in dict) el.textContent = dict[key];
+  }
+  for (const el of doc.querySelectorAll("[data-i18n-html]")) {
+    const key = el.dataset.i18nHtml;
+    if (key in dict) el.innerHTML = dict[key];
+  }
+  for (const el of doc.querySelectorAll("[data-i18n-placeholder]")) {
+    const key = el.dataset.i18nPlaceholder;
+    if (key in dict) el.placeholder = dict[key];
+  }
+  for (const el of doc.querySelectorAll("[data-i18n-title]")) {
+    const key = el.dataset.i18nTitle;
+    if (key in dict) el.title = dict[key];
+  }
+  const docLink = doc.getElementById("doc-link");
+  if (docLink) {
+    docLink.textContent = dict.docLink;
+    docLink.href = dict.docHref;
+  }
+  const langBtn = doc.getElementById("lang-toggle");
+  if (langBtn) {
+    langBtn.textContent = dict.langToggle;
+    langBtn.title = dict.langToggleTitle;
+  }
+}
+
+export const ALL_KEYS = Object.freeze(Object.keys(DICT.en));
+export { DICT };

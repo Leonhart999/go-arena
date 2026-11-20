@@ -6,16 +6,19 @@ import { MatchRunner } from "./match.js";
 import { HostRoom, GuestRoom, normalizeCode } from "./net.js";
 import { summarize, formatElo } from "./stats.js";
 import { recordToSgf, recordsToSgfCollection, recordsToCsv } from "./sgf.js";
+import { LANG_KEY, applyDomTranslations, detectLang, translate } from "./i18n.js";
 
 const $ = (id) => document.getElementById(id);
 const STORE = "go-arena.";
 const PEER_TIMEOUT_MS = 20000;
 
 const app = {
+  lang: detectLang(),
   role: "host", // "host" (also when no room is open) or "guest"
   myBridge: null,
   bBridge: null,
   refBridge: null,
+  bridgeHintState: {}, // which -> { key, vars, kind, raw }
   myHuman: new HumanPlayer(),
   bHuman: new HumanPlayer("Local"),
   room: null,
@@ -31,6 +34,8 @@ const app = {
   pingTimer: null,
   replay: { key: "", game: null },
 };
+
+const t = (key, vars) => translate(app.lang, key, vars);
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -81,7 +86,7 @@ function saveRecords() {
   try {
     localStorage.setItem(`${STORE}records`, JSON.stringify(app.records));
   } catch {
-    log("Could not save results in the browser (storage full?). Export them.");
+    log(t("logSaveFail"));
   }
 }
 
@@ -128,13 +133,13 @@ function netSettings() {
 // Players and seats
 // ---------------------------------------------------------------------------
 function myName() {
-  return $("my-name").value.trim() || (app.role === "guest" ? "Guest" : "Host");
+  return $("my-name").value.trim() || (app.role === "guest" ? t("guestDefault") : t("hostDefault"));
 }
 
 function myLabel() {
-  if ($("my-kind").value === "human") return `${myName()} (human)`;
+  if ($("my-kind").value === "human") return `${myName()} (${t("humanSuffix")})`;
   const info = app.myBridge?.info;
-  return info ? `${myName()} (${engineLabel(info)})` : `${myName()} (no engine)`;
+  return info ? `${myName()} (${engineLabel(info)})` : `${myName()} (${t("noEngineSuffix")})`;
 }
 
 function myPlayer() {
@@ -150,8 +155,9 @@ function seatBPlayer() {
     case "remote":
       return app.remote?.player ?? null;
     case "engine":
-      return app.bBridge?.info ? new EnginePlayer(app.bBridge, "Local B") : null;
+      return app.bBridge?.info ? new EnginePlayer(app.bBridge, t("localBName")) : null;
     default:
+      app.bHuman.owner = t("localBName");
       return app.bHuman;
   }
 }
@@ -159,11 +165,12 @@ function seatBPlayer() {
 function seatBLabel() {
   switch ($("b-kind").value) {
     case "remote":
-      return app.remote?.player.label ?? "(waiting for a guest)";
+      return app.remote?.player.label ?? t("waitingGuestLabel");
     case "engine":
-      return app.bBridge?.info ? `Local B (${engineLabel(app.bBridge.info)})` : "(engine B not connected)";
+      return app.bBridge?.info ? `${t("localBName")} (${engineLabel(app.bBridge.info)})` : t("engineBNotConn");
     default:
-      return app.bHuman.label;
+      app.bHuman.owner = t("localBName");
+      return `${t("localBName")} (${t("humanSuffix")})`;
   }
 }
 
@@ -189,32 +196,54 @@ const BRIDGES = {
   ref: { url: "ref-url", status: "ref-status", key: "refBridge" },
 };
 
+function setBridgeHint(which, key, vars = {}, kind = "", raw = null) {
+  app.bridgeHintState[which] = { key, vars, kind, raw };
+  const text = raw !== null ? raw : t(key, vars);
+  setHint(BRIDGES[which].status, text, kind);
+}
+
+function refreshBridgeHints() {
+  for (const which of Object.keys(BRIDGES)) {
+    const st = app.bridgeHintState[which];
+    if (!st) continue;
+    if (st.raw !== null) setHint(BRIDGES[which].status, st.raw, st.kind);
+    else if (st.key === "bridgeConnected") {
+      const info = app[BRIDGES[which].key]?.info;
+      const extra = which === "ref" && info && !info.commands?.includes("final_score") ? t("bridgeNoScore") : "";
+      setHint(BRIDGES[which].status, t("bridgeConnected", { label: st.vars.label, extra }), st.kind);
+    } else {
+      setHint(BRIDGES[which].status, t(st.key, st.vars), st.kind);
+    }
+  }
+}
+
 async function connectBridge(which) {
   const spec = BRIDGES[which];
   const url = $(spec.url).value.trim();
-  if (!url) return setHint(spec.status, "Enter the bridge address, e.g. ws://127.0.0.1:8765", "err");
+  if (!url) return setBridgeHint(which, "bridgeEnterUrl", {}, "err");
   app[spec.key]?.close();
   app[spec.key] = null;
   const client = new BridgeClient(url);
-  setHint(spec.status, `Connecting to ${url} ...`);
+  setBridgeHint(which, "bridgeConnecting", { url });
   try {
     await client.connect();
-    setHint(spec.status, "Connected, waiting for the engine to start ...");
+    setBridgeHint(which, "bridgeWaitStart");
     const info = await client.hello();
     app[spec.key] = client;
-    const scoring = info.commands?.includes("final_score") ? "" : " (no final_score)";
-    setHint(spec.status, `Connected: ${engineLabel(info)}${which === "ref" ? scoring : ""}`, "ok");
-    log(`Bridge ${url}: ${engineLabel(info)}`);
+    const label = engineLabel(info);
+    const extra = which === "ref" && !info.commands?.includes("final_score") ? t("bridgeNoScore") : "";
+    setBridgeHint(which, "bridgeConnected", { label, extra }, "ok");
+    log(t("logBridgeConnected", { url, label }));
     client.addEventListener("close", () => {
       if (app[spec.key] !== client) return;
       app[spec.key] = null;
-      setHint(spec.status, "Bridge disconnected. Restart it and press Connect.", "err");
-      log(`Bridge ${url} disconnected`);
+      setBridgeHint(which, "bridgeDisconnected", {}, "err");
+      log(t("logBridgeLost", { url }));
       onSeatsChanged();
     });
   } catch (e) {
     client.close();
-    setHint(spec.status, e.message, "err");
+    setBridgeHint(which, "", {}, "err", e.message);
   }
   onSeatsChanged();
 }
@@ -226,9 +255,9 @@ function startMatch() {
   if (app.runner?.running) return;
   const a = myPlayer();
   const b = seatBPlayer();
-  if (!a) return log("Seat A: connect your engine first (or choose to play by hand).");
-  if (!b) return log("Seat B is empty: connect engine B or wait for a guest to join.");
-  if (app.records.length && !confirm("Start a new match? The current results will be cleared (export them first if needed).")) return;
+  if (!a) return log(t("logNeedSeatA"));
+  if (!b) return log(t("logNeedSeatB"));
+  if (app.records.length && !confirm(t("confirmNewMatch"))) return;
   const referee = app.refBridge?.info ? new EnginePlayer(app.refBridge, "referee") : null;
   const runner = new MatchRunner(readConfig(), { A: a, B: b }, { referee });
   app.runner = runner;
@@ -245,10 +274,10 @@ function startMatch() {
     broadcast({ t: "record", record: e.detail });
     renderResults();
   });
-  runner.addEventListener("done", () => log("Match finished."));
-  log(`Match started: ${a.label} vs ${b.label}, ${runner.config.games} games`);
+  runner.addEventListener("done", () => log(t("logMatchDone")));
+  log(t("logMatchStart", { a: a.label, b: b.label, games: runner.config.games }));
   runner.run().catch((e) => {
-    log(`Match error: ${e.message}`);
+    log(t("logMatchError", { msg: e.message }));
     console.error(e);
   });
   update();
@@ -289,12 +318,12 @@ async function createRoom() {
   }
   const room = new HostRoom();
   $("room-create").disabled = true;
-  log("Opening room ...");
+  log(t("logOpeningRoom"));
   try {
     await room.open(settings);
   } catch (e) {
     $("room-create").disabled = false;
-    log(`Could not open a room: ${e.message}`);
+    log(t("logOpenRoomFail", { msg: e.message }));
     return;
   }
   $("room-create").disabled = false;
@@ -305,17 +334,17 @@ async function createRoom() {
   });
   room.addEventListener("leave", (e) => onPeerLeft(e.detail));
   room.addEventListener("message", (e) => onHostMessage(e.detail.conn, e.detail.msg));
-  room.addEventListener("error", (e) => log(`Room: ${e.detail?.message ?? e.detail}`));
+  room.addEventListener("error", (e) => log(t("logRoomErr", { msg: e.detail?.message ?? e.detail })));
   app.pingTimer = setInterval(() => {
     broadcast({ t: "ping" });
     for (const [conn, peer] of app.peers) {
       if (Date.now() - peer.lastSeen > PEER_TIMEOUT_MS) {
-        log(`${peer.label} stopped answering; dropping`);
+        log(t("logPeerTimeout", { label: peer.label }));
         room.drop(conn);
       }
     }
   }, 5000);
-  log(`Room ${room.code} is open.`);
+  log(t("logRoomOpen", { code: room.code }));
   update();
 }
 
@@ -326,7 +355,7 @@ function assignSeatB() {
     app.remote = { conn, player: new RemotePlayer(conn, { label: peer.label, kind: peer.kind }) };
     peer.role = "player";
     app.room.send(conn, { t: "welcome", seat: "B", host: myLabel() });
-    log(`${peer.label} takes seat B`);
+    log(t("logPeerTakesB", { label: peer.label }));
     onSeatsChanged();
     return;
   }
@@ -383,7 +412,7 @@ function onHostMessage(conn, msg) {
 function onPeerLeft(conn) {
   const peer = app.peers.get(conn);
   app.peers.delete(conn);
-  log(`${peer?.label ?? "A guest"} left the room`);
+  log(t("logPeerLeft", { label: peer?.label ?? t("guestDefault") }));
   if (app.remote?.conn === conn) {
     releaseSeatB("seat B left the room");
     assignSeatB();
@@ -396,22 +425,22 @@ function onPeerLeft(conn) {
 // ---------------------------------------------------------------------------
 async function joinRoom() {
   const code = normalizeCode($("join-code").value);
-  if (!code) return log("Enter the room code from the invite link.");
+  if (!code) return log(t("logEnterCode"));
   let settings;
   try {
     settings = netSettings();
   } catch (e) {
     return log(e.message);
   }
-  if (app.runner?.running) return log("Stop your own match before joining another room.");
+  if (app.runner?.running) return log(t("logStopFirst"));
   const room = new GuestRoom();
   $("room-join").disabled = true;
-  log(`Joining room ${code} ...`);
+  log(t("logJoining", { code }));
   try {
     await room.join(settings, code);
   } catch (e) {
     $("room-join").disabled = false;
-    log(`Could not join: ${e.message}`);
+    log(t("logJoinFail", { msg: e.message }));
     return;
   }
   $("room-join").disabled = false;
@@ -422,11 +451,11 @@ async function joinRoom() {
   app.records = [];
   room.addEventListener("message", (e) => onGuestMessage(e.detail));
   room.addEventListener("close", () => {
-    log("Connection to the host closed.");
+    log(t("logHostClosed"));
     leaveRoom();
   });
   sendHello();
-  log(`Joined room ${code}.`);
+  log(t("logJoined", { code }));
   update();
   renderResults();
 }
@@ -445,7 +474,7 @@ function onGuestMessage(msg) {
   if (!msg || typeof msg !== "object") return;
   switch (msg.t) {
     case "welcome":
-      if (app.mySeat !== msg.seat) log(msg.seat ? `You play seat B against ${msg.host}.` : `Watching ${msg.host}'s room.`);
+      if (app.mySeat !== msg.seat) log(msg.seat ? t("logWelcomeSeatB", { host: msg.host }) : t("logWelcomeWatch", { host: msg.host }));
       app.mySeat = msg.seat;
       app.hostLabel = msg.host;
       update();
@@ -517,7 +546,7 @@ function leaveRoom() {
     releaseSeatB("room closed");
     app.peers.clear();
   }
-  log("Left the room.");
+  log(t("logLeftRoom"));
   update();
   renderResults();
 }
@@ -578,16 +607,16 @@ function renderPlayers(v) {
   const rec = app.review?.rec;
   const blackSeat = rec?.blackSeat ?? cur?.blackSeat ?? "A";
   const whiteSeat = blackSeat === "A" ? "B" : "A";
-  const labels = rec?.labels ?? cur?.labels ?? v?.seats ?? { A: "Seat A", B: "Seat B" };
+  const labels = rec?.labels ?? cur?.labels ?? v?.seats ?? { A: t("seatADefault"), B: t("seatBDefault") };
   $("black-name").textContent = `${labels[blackSeat]}  [${blackSeat}]`;
   $("white-name").textContent = `${labels[whiteSeat]}  [${whiteSeat}]`;
   const thinking = cur && !cur.result ? cur.thinking : null;
   for (const [color, id] of [["B", "black"], ["W", "white"]]) {
     const parts = [];
-    if (cur) parts.push(`captures ${cur.captures?.[color] ?? 0}`);
+    if (cur) parts.push(t("captures", { n: cur.captures?.[color] ?? 0 }));
     if (thinking?.color === color) {
       const secs = (thinking.elapsed + Date.now() - app.viewAt) / 1000;
-      parts.push(`thinking ${secs.toFixed(1)}s`);
+      parts.push(t("thinking", { s: secs.toFixed(1) }));
     }
     $(`${id}-meta`).textContent = parts.join(" · ");
     $(`pl-${id}`).classList.toggle("to-move", thinking?.color === color);
@@ -597,25 +626,28 @@ function renderPlayers(v) {
 function renderStatus(v) {
   const line = $("status-line");
   if (app.review) {
-    line.textContent = `Reviewing game ${app.review.rec.index + 1}: ${app.review.rec.result}`;
+    line.textContent = t("statusReviewing", { game: app.review.rec.index + 1, result: app.review.rec.result });
     return;
   }
   if (app.role === "guest" && !v) {
-    line.textContent = "Waiting for the host ...";
+    line.textContent = t("statusWaitingHost");
     return;
   }
   const cur = v?.current;
   if (!cur) {
-    line.textContent = v?.running ? "Starting ..." : "Idle";
+    line.textContent = v?.running ? t("statusStarting") : t("statusIdle");
     return;
   }
-  const head = `Game ${cur.index + 1}${v.config ? ` (${Math.min(v.played + (cur.result ? 0 : 1), v.config.games)} of ${v.config.games})` : ""}`;
+  const prog = v.config ? ` (${Math.min(v.played + (cur.result ? 0 : 1), v.config.games)}/${v.config.games})` : "";
+  const head = t("statusGameHead", { game: cur.index + 1, prog });
   if (cur.result) {
-    line.textContent = `${head}: ${cur.result}, ${cur.reason}${v.paused ? " · paused" : v.running ? "" : " · match over"}`;
+    const tail = v.paused ? t("statusPausedTail") : v.running ? "" : t("statusMatchOverTail");
+    line.textContent = t("statusGameDone", { head, result: cur.result, reason: cur.reason, tail });
     return;
   }
-  const toMove = cur.moves.length % 2 === 0 ? "Black" : "White";
-  line.textContent = `${head} · move ${cur.moves.length + 1} · ${toMove} to play${v.paused ? " · pausing after this move" : ""}`;
+  const side = cur.moves.length % 2 === 0 ? t("sideBlack") : t("sideWhite");
+  const tail = v.paused ? t("statusPausingAfter") : "";
+  line.textContent = t("statusMove", { head, move: cur.moves.length + 1, side, tail });
 }
 
 function renderControls(v) {
@@ -637,21 +669,23 @@ function renderControls(v) {
   $("b-remote-status").hidden = !bRemote;
   if (bRemote) {
     $("b-remote-status").textContent = app.remote
-      ? `Seat B: ${app.remote.player.label}`
+      ? t("seatBConnected", { label: app.remote.player.label })
       : app.room
-        ? "Seat B: waiting for a guest to join the room."
-        : "Seat B: create a room and send the invite link to your opponent.";
+        ? t("seatBWaiting")
+        : t("seatBInviteHint");
   }
 
   const badge = $("role-badge");
   if (app.role === "guest") {
-    badge.textContent = app.mySeat ? `guest · seat B · room ${app.room?.code}` : `watching room ${app.room?.code}`;
+    badge.textContent = app.mySeat
+      ? t("badgeGuestSeat", { code: app.room?.code })
+      : t("badgeWatching", { code: app.room?.code });
     badge.className = "badge guest";
   } else if (app.room) {
-    badge.textContent = `host · room ${app.room.code}`;
+    badge.textContent = t("badgeHost", { code: app.room.code });
     badge.className = "badge host";
   } else {
-    badge.textContent = "local";
+    badge.textContent = t("badgeLocal");
     badge.className = "badge";
   }
 
@@ -670,14 +704,14 @@ function renderRoom() {
   list.replaceChildren();
   if (app.role === "host") {
     const n = app.peers.size;
-    setHint("room-status", n ? `${n} guest${n > 1 ? "s" : ""} connected.` : "Share the invite link. Guests connect directly to this tab.");
+    setHint("room-status", n ? t("roomGuestsCount", { n }) : t("roomShareHint"));
     for (const peer of app.peers.values()) {
       const li = document.createElement("li");
-      li.textContent = `${peer.label} · ${peer.role === "player" ? "seat B" : peer.role}`;
+      li.textContent = t("roomPeerLine", { label: peer.label, role: peer.role });
       list.appendChild(li);
     }
   } else {
-    setHint("room-status", app.mySeat ? "You are seat B. Keep this tab open while the match runs." : "Watching.", "ok");
+    setHint("room-status", app.mySeat ? t("roomGuestSeatB") : t("roomGuestWatching"), "ok");
   }
 }
 
@@ -718,7 +752,7 @@ function renderResults() {
   const box = $("summary");
   const decided = recs.filter((r) => !r.void);
   if (!decided.length) {
-    box.textContent = recs.length ? "Only void games so far." : "No games yet.";
+    box.textContent = recs.length ? t("summaryVoidOnly") : t("summaryEmpty");
     return;
   }
   const s = summarize(recs);
@@ -734,17 +768,17 @@ function renderResults() {
   };
   add(`A: ${labels.A}`);
   add(`B: ${labels.B}`);
-  add(`A ${s.aWins} : ${s.bWins} B${s.draws ? ` (draws ${s.draws})` : ""} in ${s.games} games${s.voids ? `, ${s.voids} void` : ""}`, "big");
-  add(`A score ${pct(s.score)}, 95% CI ${pct(s.ci[0])} to ${pct(s.ci[1])}`);
-  add(`Elo A minus B ${formatElo(s.elo)} (95% CI ${formatElo(s.eloCi[0])} to ${formatElo(s.eloCi[1])}), LOS ${pct(s.los)}`);
-  add(`A as Black ${wld(s.aAsBlack)}, as White ${wld(s.aAsWhite)} · Black won ${s.blackWins} of ${s.blackWins + s.whiteWins}`);
-  add(`Avg time per move: A ${(s.avgMs.A / 1000).toFixed(2)}s, B ${(s.avgMs.B / 1000).toFixed(2)}s · avg length ${Math.round(s.avgLength)} moves`);
+  add(t("summaryLineAB", { a: s.aWins, b: s.bWins, draws: s.draws, games: s.games, voids: s.voids }), "big");
+  add(t("summaryScore", { score: pct(s.score), lo: pct(s.ci[0]), hi: pct(s.ci[1]) }));
+  add(t("summaryElo", { elo: formatElo(s.elo), lo: formatElo(s.eloCi[0]), hi: formatElo(s.eloCi[1]), los: pct(s.los) }));
+  add(t("summaryColors", { asB: wld(s.aAsBlack), asW: wld(s.aAsWhite), bWins: s.blackWins, total: s.blackWins + s.whiteWins }));
+  add(t("summaryTiming", { avgA: (s.avgMs.A / 1000).toFixed(2), avgB: (s.avgMs.B / 1000).toFixed(2), avgLen: Math.round(s.avgLength) }));
 }
 
 function openReview(rec) {
   app.review = { rec, moveNo: rec.moves.length };
   $("review-bar").hidden = false;
-  $("review-title").textContent = `Game ${rec.index + 1} · ${rec.result}`;
+  $("review-title").textContent = t("reviewTitle", { game: rec.index + 1, result: rec.result });
   const slider = $("review-slider");
   slider.max = String(rec.moves.length);
   slider.value = String(rec.moves.length);
@@ -754,8 +788,9 @@ function openReview(rec) {
 function updateReviewLabel() {
   if (!app.review) return;
   const { rec, moveNo } = app.review;
+  $("review-title").textContent = t("reviewTitle", { game: rec.index + 1, result: rec.result });
   const mv = moveNo > 0 ? rec.moves[moveNo - 1] : null;
-  $("review-move").textContent = mv ? `${moveNo}. ${mv[0]} ${mv[1]} (${(mv[2] / 1000).toFixed(1)}s)` : "start";
+  $("review-move").textContent = mv ? t("reviewMove", { no: moveNo, c: mv[0], v: mv[1], s: (mv[2] / 1000).toFixed(1) }) : t("reviewStart");
 }
 
 function update() {
@@ -772,6 +807,24 @@ function update() {
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
+function setLanguage(lang) {
+  app.lang = lang === "zh" ? "zh" : "en";
+  try {
+    localStorage.setItem(LANG_KEY, app.lang);
+  } catch {
+    // ignore storage errors
+  }
+  applyDomTranslations(document, app.lang);
+  refreshBridgeHints();
+  if (app.runner?.running) {
+    app.runner.setSeat("A", myPlayer() || app.runner.seats.A);
+    app.runner.setSeat("B", seatBPlayer() || app.runner.seats.B);
+  }
+  if (app.role === "guest") sendHello();
+  update();
+  renderResults();
+}
+
 function onBoardClick(point) {
   const human = activeHuman();
   if (!human || app.review) return;
@@ -781,10 +834,10 @@ function onBoardClick(point) {
   try {
     g = GameState.fromMoves(ctx.size, ctx.komi, ctx.koRule, ctx.moves);
   } catch (e) {
-    return log(`Cannot rebuild the position: ${e.message}`);
+    return log(t("logRebuildFail", { msg: e.message }));
   }
   if (!g.board.isLegal(color, point)) {
-    $("status-line").textContent = `${g.board.toGtp(point)} is not a legal move.`;
+    $("status-line").textContent = t("illegalMove", { v: g.board.toGtp(point) });
     return;
   }
   human.submit(g.board.toGtp(point));
@@ -792,18 +845,20 @@ function onBoardClick(point) {
 
 function init() {
   restoreInputs();
+  applyDomTranslations(document, app.lang);
   boardView = new BoardView($("board"), { onClick: onBoardClick });
 
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.get("room")) {
     $("join-code").value = hash.get("room");
     if (hash.get("sig")) $("net-signal").value = hash.get("sig");
-    log(`Invite for room ${hash.get("room")}: set up your player, then press Join.`);
+    log(t("logInviteRestored", { room: hash.get("room") }));
   }
 
   app.records = loadRecords();
-  if (app.records.length) log(`Restored ${app.records.length} game(s) from the last session.`);
+  if (app.records.length) log(t("logRestoredGames", { n: app.records.length }));
 
+  $("lang-toggle").onclick = () => setLanguage(app.lang === "zh" ? "en" : "zh");
   $("my-connect").onclick = () => connectBridge("my");
   $("b-connect").onclick = () => connectBridge("b");
   $("ref-connect").onclick = () => connectBridge("ref");
@@ -830,9 +885,9 @@ function init() {
     const link = inviteLink();
     try {
       await navigator.clipboard.writeText(link);
-      log(`Invite link copied: ${link}`);
+      log(t("logInviteCopied", { link }));
     } catch {
-      prompt("Copy the invite link:", link);
+      prompt(t("promptCopyInvite"), link);
     }
   };
 
@@ -841,14 +896,14 @@ function init() {
   $("m-resume").onclick = () => {
     if (!app.runner) return;
     onSeatsChanged();
-    if ($("b-kind").value === "remote" && !app.remote) return log("Seat B is empty: wait for the guest to rejoin.");
+    if ($("b-kind").value === "remote" && !app.remote) return log(t("logWaitGuestRejoin"));
     app.runner.resume();
   };
   $("m-stop").onclick = () => app.runner?.stop();
 
   $("btn-pass").onclick = () => activeHuman()?.submit("pass");
   $("btn-resign").onclick = () => {
-    if (confirm("Resign this game?")) activeHuman()?.submit("resign");
+    if (confirm(t("confirmResign"))) activeHuman()?.submit("resign");
   };
   for (const h of [app.myHuman, app.bHuman]) h.addEventListener("turn", update);
 
@@ -865,13 +920,13 @@ function init() {
   $("review-sgf").onclick = () => app.review && download(`go-arena-game${app.review.rec.index + 1}.sgf`, recordToSgf(app.review.rec), "application/x-go-sgf");
 
   $("exp-sgf").onclick = () => {
-    if (!app.records.some((r) => !r.void)) return log("No finished games to export.");
+    if (!app.records.some((r) => !r.void)) return log(t("logNoGamesExport"));
     download(`go-arena-${stamp()}.sgf`, recordsToSgfCollection(app.records), "application/x-go-sgf");
   };
   $("exp-csv").onclick = () => download(`go-arena-${stamp()}.csv`, recordsToCsv(app.records), "text/csv");
   $("exp-json").onclick = () => download(`go-arena-${stamp()}.json`, JSON.stringify(app.records, null, 1), "application/json");
   $("res-clear").onclick = () => {
-    if (!confirm("Delete all results on this page?")) return;
+    if (!confirm(t("confirmClear"))) return;
     app.records = [];
     saveRecords();
     broadcast({ t: "records", records: [] });

@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { BLACK, WHITE, PASS, Board, GameState, IllegalMove, formatScore } from "../web/js/go.js";
 import { wilson, eloFromScore, los, summarize } from "../web/js/stats.js";
 import { recordToSgf, recordsToCsv } from "../web/js/sgf.js";
+import { readFileSync } from "node:fs";
 import { MatchRunner, parseScore } from "../web/js/match.js";
+import { DICT, detectLang, translate } from "../web/js/i18n.js";
 
 test("GTP coordinates skip I and round-trip", () => {
   const b = new Board(19);
@@ -171,4 +173,22 @@ test("MatchRunner alternates colors and handles wins, resigns, illegal moves", a
   assert.equal(runner.records[1].blackSeat, "B");
   assert.equal(runner.records[1].result, "B+R");
   assert.equal(runner.records[1].winnerSeat, "B");
+});
+
+test("i18n dictionary covers all HTML keys in both en and zh", () => {
+  const enKeys = Object.keys(DICT.en);
+  const zhKeys = Object.keys(DICT.zh);
+  assert.deepEqual(zhKeys.sort(), enKeys.sort());
+
+  const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+  for (const m of html.matchAll(/data-i18n(?:-(?:html|placeholder|title))?="([^"]+)"/g)) {
+    const key = m[1];
+    assert.ok(key in DICT.en, `missing en key for HTML attribute: ${key}`);
+    assert.ok(key in DICT.zh, `missing zh key for HTML attribute: ${key}`);
+  }
+
+  assert.equal(detectLang({ getItem: () => "zh" }, { language: "en-US" }), "zh");
+  assert.equal(detectLang({ getItem: () => null }, { language: "zh-CN" }), "zh");
+  assert.equal(detectLang({ getItem: () => null }, { language: "en-US" }), "en");
+  assert.ok(translate("zh", "captures", { n: 3 }).includes("3"));
 });
