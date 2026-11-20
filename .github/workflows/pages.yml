@@ -3,6 +3,9 @@ name: Deploy web arena to GitHub Pages
 on:
   push:
     branches: ["main"]
+    paths:
+      - "web/**"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -29,6 +32,8 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: "web"
+      - name: Wait for artifact indexing
+        run: sleep 5
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
