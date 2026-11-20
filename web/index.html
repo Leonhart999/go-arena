@@ -8,10 +8,21 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>go-arena</h1>
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true">
+        <circle cx="10.5" cy="14" r="7.2" fill="#1b1e23" stroke="rgba(255,255,255,0.22)" stroke-width="1"/>
+        <circle cx="8.2" cy="11.5" r="2.1" fill="#ffffff" fill-opacity="0.22"/>
+        <circle cx="18.2" cy="14" r="7.2" fill="#f7f4ec" stroke="#b5afa3" stroke-width="1.2"/>
+      </svg>
+      <h1>go-arena</h1>
+    </div>
     <span id="role-badge" class="badge">local</span>
     <span class="spacer"></span>
-    <a id="doc-link" href="https://github.com/Leonhart999/go-arena#readme" target="_blank" rel="noopener">How to connect an engine</a>
+    <a id="doc-link" class="top-link" href="https://github.com/Leonhart999/go-arena#readme" target="_blank" rel="noopener">How to connect an engine</a>
+    <button id="theme-toggle" class="icon-btn" type="button" title="Switch theme" aria-label="Switch theme">
+      <svg class="ic ic-moon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 11.8A6.8 6.8 0 0 1 8.2 3.5a6.8 6.8 0 1 0 8.3 8.3z"/></svg>
+      <svg class="ic ic-sun" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="3.6"/><path d="M10 2.2v1.6M10 16.2v1.6M3.8 10H2.2M17.8 10h-1.6M4.8 4.8l1.1 1.1M14.1 14.1l1.1 1.1M15.2 4.8l-1.1 1.1M5.9 14.1l-1.1 1.1"/></svg>
+    </button>
     <button id="lang-toggle" class="lang-btn" type="button" title="Switch language">中文</button>
   </header>
 
@@ -19,166 +30,209 @@
     <section class="board-col">
       <div class="players">
         <div class="player" id="pl-black">
-          <span class="dot dot-b"></span>
+          <span class="dot dot-b" aria-hidden="true"></span>
           <div class="pl-text">
             <div class="pl-name" id="black-name" data-i18n="blackDefault">Black</div>
             <div class="pl-meta" id="black-meta"></div>
           </div>
+          <span class="turn-pulse" aria-hidden="true"></span>
         </div>
         <div class="player" id="pl-white">
-          <span class="dot dot-w"></span>
+          <span class="dot dot-w" aria-hidden="true"></span>
           <div class="pl-text">
             <div class="pl-name" id="white-name" data-i18n="whiteDefault">White</div>
             <div class="pl-meta" id="white-meta"></div>
           </div>
+          <span class="turn-pulse" aria-hidden="true"></span>
         </div>
       </div>
-      <div id="board" class="board-wrap"></div>
+
+      <div class="board-stage">
+        <div id="board" class="board-wrap"></div>
+      </div>
+
       <div class="board-bar">
+        <span class="status-dot" id="status-dot" aria-hidden="true"></span>
         <span id="status-line" data-i18n="statusIdle">Idle</span>
         <span class="spacer"></span>
-        <span id="human-controls" hidden>
+        <span id="human-controls" class="btn-group" hidden>
           <button id="btn-pass" data-i18n="btnPass">Pass</button>
           <button id="btn-resign" class="danger" data-i18n="btnResign">Resign</button>
         </span>
+        <button id="btn-numbers" class="chip-btn" type="button" data-i18n="btnNumbers" data-i18n-title="titleNumbers" title="Show move numbers on stones">Move #</button>
       </div>
+
       <div id="review-bar" class="review-bar" hidden>
-        <span id="review-title"></span>
-        <input id="review-slider" type="range" min="0" max="0" value="0">
-        <span id="review-move"></span>
+        <span id="review-title" class="review-title"></span>
+        <div class="review-steps">
+          <button id="review-first" class="step-btn" type="button" data-i18n-title="titleReviewFirst" title="First move (Home)">&#x23EE;</button>
+          <button id="review-prev" class="step-btn" type="button" data-i18n-title="titleReviewPrev" title="Previous move (Left)">&#x25C0;</button>
+          <input id="review-slider" type="range" min="0" max="0" value="0">
+          <button id="review-next" class="step-btn" type="button" data-i18n-title="titleReviewNext" title="Next move (Right)">&#x25B6;</button>
+          <button id="review-last" class="step-btn" type="button" data-i18n-title="titleReviewLast" title="Last move (End)">&#x23ED;</button>
+        </div>
+        <span id="review-move" class="review-move"></span>
         <button id="review-sgf" data-i18n="btnSgf">SGF</button>
-        <button id="review-close" data-i18n="btnBackLive">Back to live</button>
+        <button id="review-close" class="primary-soft" data-i18n="btnBackLive">Back to live</button>
       </div>
     </section>
 
     <aside class="side">
-      <details class="card" id="card-me" open>
-        <summary data-i18n="cardMe">1. My player</summary>
-        <div class="row">
-          <label for="my-name" data-i18n="lblName">Name</label>
-          <input id="my-name" data-persist maxlength="40" placeholder="Your name" data-i18n-placeholder="phMyName">
-        </div>
-        <div class="row">
-          <label for="my-kind" data-i18n="lblPlaysAs">Plays as</label>
-          <select id="my-kind" data-persist>
-            <option value="engine" data-i18n="optMyEngine">Engine on this computer (via bridge)</option>
-            <option value="human" data-i18n="optMyHuman">Me, clicking on the board</option>
-          </select>
-        </div>
-        <div id="my-engine-box">
-          <div class="row">
-            <label for="my-url" data-i18n="lblBridge">Bridge</label>
-            <input id="my-url" data-persist value="ws://127.0.0.1:8765" spellcheck="false">
-            <button id="my-connect" data-i18n="btnConnect">Connect</button>
-          </div>
-          <div class="hint" id="my-status" data-i18n-html="myStatusDefaultHtml">Not connected. Start <code>bridge/gtp_bridge.py</code> first.</div>
-        </div>
-      </details>
+      <div class="match-dock host-only">
+        <button id="m-start" class="primary" data-i18n="btnStart">Start match</button>
+        <button id="m-pause" data-i18n="btnPause">Pause</button>
+        <button id="m-resume" data-i18n="btnResume">Resume</button>
+        <button id="m-stop" class="danger" data-i18n="btnStop">Stop</button>
+      </div>
 
-      <details class="card" id="card-room" open>
-        <summary data-i18n="cardRoom">2. Room</summary>
-        <div id="room-idle">
-          <div class="row">
-            <button id="room-create" class="primary" data-i18n="btnCreateRoom">Create room</button>
-            <span class="hint" data-i18n="createRoomHint">You host: your engine is seat A and the match runs in this tab.</span>
+      <nav class="tabs" role="tablist">
+        <button class="tab active" type="button" role="tab" data-tab="setup" aria-selected="true">
+          <span data-i18n="tabSetup">Setup</span>
+        </button>
+        <button class="tab" type="button" role="tab" data-tab="results" aria-selected="false">
+          <span data-i18n="tabResults">Results</span>
+          <span id="tab-results-count" class="tab-pill" hidden>0</span>
+        </button>
+        <button class="tab" type="button" role="tab" data-tab="log" aria-selected="false">
+          <span data-i18n="tabLog">Log</span>
+        </button>
+      </nav>
+
+      <div class="tab-pane active" id="pane-setup" data-pane="setup">
+        <details class="card" id="card-me" open>
+          <summary><span class="sum-dot" id="dot-me"></span><span data-i18n="cardMe">1. My player</span></summary>
+          <div class="card-body">
+            <div class="row">
+              <label for="my-name" data-i18n="lblName">Name</label>
+              <input id="my-name" data-persist maxlength="40" placeholder="Your name" data-i18n-placeholder="phMyName">
+            </div>
+            <div class="row">
+              <label for="my-kind" data-i18n="lblPlaysAs">Plays as</label>
+              <select id="my-kind" data-persist>
+                <option value="engine" data-i18n="optMyEngine">Engine on this computer (via bridge)</option>
+                <option value="human" data-i18n="optMyHuman">Me, clicking on the board</option>
+              </select>
+            </div>
+            <div id="my-engine-box">
+              <div class="row">
+                <label for="my-url" data-i18n="lblBridge">Bridge</label>
+                <input id="my-url" data-persist value="ws://127.0.0.1:8765" spellcheck="false">
+                <button id="my-connect" data-i18n="btnConnect">Connect</button>
+              </div>
+              <div class="hint" id="my-status" data-i18n-html="myStatusDefaultHtml">Not connected. Start <code>bridge/gtp_bridge.py</code> first.</div>
+            </div>
           </div>
-          <div class="row">
-            <input id="join-code" placeholder="room code" data-i18n-placeholder="phJoinCode" spellcheck="false" maxlength="40">
-            <label class="check"><input type="checkbox" id="join-watch"> <span data-i18n="chkWatchOnly">watch only</span></label>
-            <button id="room-join" data-i18n="btnJoin">Join</button>
-          </div>
-        </div>
-        <div id="room-active" hidden>
-          <div class="row">
-            <span><span data-i18n="roomPrefix">Room </span><b id="room-code"></b></span>
-            <button id="room-copy" data-i18n="btnCopyInvite">Copy invite link</button>
-            <button id="room-leave" class="danger" data-i18n="btnLeave">Leave</button>
-          </div>
-          <div class="hint" id="room-status"></div>
-          <ul id="room-peers" class="peers"></ul>
-        </div>
-        <details class="advanced">
-          <summary data-i18n="advNet">Network settings</summary>
-          <div class="row">
-            <label for="net-signal" data-i18n="lblSignal">Signaling</label>
-            <input id="net-signal" data-persist placeholder="default: PeerJS cloud (0.peerjs.com)" data-i18n-placeholder="phSignal" spellcheck="false">
-          </div>
-          <label for="net-ice" class="block" data-i18n="lblIce">ICE servers (JSON, empty = built-in STUN + PeerJS TURN)</label>
-          <textarea id="net-ice" data-persist rows="4" spellcheck="false" placeholder='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'></textarea>
-          <div class="hint" data-i18n="netHint">Both sides must use the same signaling server. A custom one is added to the invite link.</div>
         </details>
-      </details>
 
-      <details class="card host-only" id="card-match" open>
-        <summary data-i18n="cardMatch">3. Match</summary>
-        <div class="row">
-          <label for="b-kind" data-i18n="lblSeatB">Seat B</label>
-          <select id="b-kind" data-persist>
-            <option value="remote" data-i18n="optBRemote">Room guest</option>
-            <option value="engine" data-i18n="optBEngine">Second engine on this computer</option>
-            <option value="human" data-i18n="optBHuman">Human on this page</option>
-          </select>
-        </div>
-        <div id="b-engine-box" hidden>
-          <div class="row">
-            <label for="b-url" data-i18n="lblBridgeB">Bridge B</label>
-            <input id="b-url" data-persist value="ws://127.0.0.1:8766" spellcheck="false">
-            <button id="b-connect" data-i18n="btnConnect">Connect</button>
+        <details class="card" id="card-room" open>
+          <summary><span class="sum-dot" id="dot-room"></span><span data-i18n="cardRoom">2. Room</span></summary>
+          <div class="card-body">
+            <div id="room-idle">
+              <div class="row room-create-row">
+                <button id="room-create" class="primary" data-i18n="btnCreateRoom">Create room</button>
+                <span class="hint" data-i18n="createRoomHint">You host: your engine is seat A and the match runs in this tab.</span>
+              </div>
+              <div class="row">
+                <input id="join-code" placeholder="room code" data-i18n-placeholder="phJoinCode" spellcheck="false" maxlength="40">
+                <label class="check"><input type="checkbox" id="join-watch"> <span data-i18n="chkWatchOnly">watch only</span></label>
+                <button id="room-join" data-i18n="btnJoin">Join</button>
+              </div>
+            </div>
+            <div id="room-active" hidden>
+              <div class="row">
+                <span class="room-tag"><span data-i18n="roomPrefix">Room </span><b id="room-code"></b></span>
+                <span class="spacer"></span>
+                <button id="room-copy" class="primary-soft" data-i18n="btnCopyInvite">Copy invite link</button>
+                <button id="room-leave" class="danger" data-i18n="btnLeave">Leave</button>
+              </div>
+              <div class="hint" id="room-status"></div>
+              <ul id="room-peers" class="peers"></ul>
+            </div>
+            <details class="advanced">
+              <summary data-i18n="advNet">Network settings</summary>
+              <div class="row">
+                <label for="net-signal" data-i18n="lblSignal">Signaling</label>
+                <input id="net-signal" data-persist placeholder="default: PeerJS cloud (0.peerjs.com)" data-i18n-placeholder="phSignal" spellcheck="false">
+              </div>
+              <label for="net-ice" class="block" data-i18n="lblIce">ICE servers (JSON, empty = built-in STUN + PeerJS TURN)</label>
+              <textarea id="net-ice" data-persist rows="3" spellcheck="false" placeholder='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'></textarea>
+              <div class="hint" data-i18n="netHint">Both sides must use the same signaling server. A custom one is added to the invite link.</div>
+            </details>
           </div>
-          <div class="hint" id="b-status" data-i18n="bStatusDefault">Not connected.</div>
-        </div>
-        <div class="hint" id="b-remote-status"></div>
-        <div class="grid">
-          <label><span data-i18n="lblBoard">Board</span> <select id="cfg-size" data-persist>
-            <option value="19">19x19</option><option value="13">13x13</option><option value="9">9x9</option>
-          </select></label>
-          <label><span data-i18n="lblKomi">Komi</span> <input id="cfg-komi" data-persist type="number" step="0.5" value="7.5"></label>
-          <label><span data-i18n="lblKoRule">Ko rule</span> <select id="cfg-ko" data-persist>
-            <option value="positional" data-i18n="optKoPos">positional superko</option>
-            <option value="situational" data-i18n="optKoSit">situational superko</option>
-            <option value="simple" data-i18n="optKoSim">simple ko</option>
-          </select></label>
-          <label><span data-i18n="lblGames">Games</span> <input id="cfg-games" data-persist type="number" min="1" max="1000" value="10"></label>
-          <label><span data-i18n="lblTime">Sec / move</span> <input id="cfg-time" data-persist type="number" min="0" step="0.5" value="10" title="0 = unlimited; engines that exceed it lose on time" data-i18n-title="titleTime"></label>
-          <label><span data-i18n="lblMaxMoves">Max moves</span> <input id="cfg-maxmoves" data-persist type="number" min="0" value="0" title="0 = 2 x board points; then scored as is" data-i18n-title="titleMaxMoves"></label>
-          <label><span data-i18n="lblDelay">Delay ms</span> <input id="cfg-delay" data-persist type="number" min="0" step="100" value="0" title="pause after each move, for watching" data-i18n-title="titleDelay"></label>
-          <label class="check"><input type="checkbox" id="cfg-alternate" data-persist checked> <span data-i18n="chkAlternate">alternate colors</span></label>
-        </div>
-        <div class="row">
-          <label for="ref-url" data-i18n="lblReferee">Referee</label>
-          <input id="ref-url" data-persist placeholder="optional bridge for final_score" data-i18n-placeholder="phReferee" spellcheck="false">
-          <button id="ref-connect" data-i18n="btnConnect">Connect</button>
-        </div>
-        <div class="hint" id="ref-status" data-i18n="refStatusDefault">Without a referee, finished games are scored by Tromp-Taylor area counting (dead stones must be captured).</div>
-        <div class="row buttons">
-          <button id="m-start" class="primary" data-i18n="btnStart">Start match</button>
-          <button id="m-pause" data-i18n="btnPause">Pause</button>
-          <button id="m-resume" data-i18n="btnResume">Resume</button>
-          <button id="m-stop" class="danger" data-i18n="btnStop">Stop</button>
-        </div>
-      </details>
+        </details>
 
-      <section class="card" id="card-results">
-        <h2 data-i18n="cardResults">Results</h2>
-        <div id="summary" class="summary" data-i18n="summaryEmpty">No games yet.</div>
-        <div class="table-wrap">
-          <table id="results-table">
-            <thead><tr><th data-i18n="thGame">#</th><th data-i18n="thBlack">Black</th><th data-i18n="thWhite">White</th><th data-i18n="thResult">Result</th><th data-i18n="thMoves">Moves</th><th data-i18n="thReason">Reason</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <div class="row buttons">
-          <button id="exp-sgf" data-i18n="btnExpSgf">All games (SGF)</button>
-          <button id="exp-csv" data-i18n="btnExpCsv">CSV</button>
-          <button id="exp-json" data-i18n="btnExpJson">JSON</button>
-          <button id="res-clear" class="host-only danger" data-i18n="btnClear">Clear</button>
-        </div>
-      </section>
+        <details class="card host-only" id="card-match" open>
+          <summary><span class="sum-dot" id="dot-match"></span><span data-i18n="cardMatch">3. Match</span></summary>
+          <div class="card-body">
+            <div class="row">
+              <label for="b-kind" data-i18n="lblSeatB">Seat B</label>
+              <select id="b-kind" data-persist>
+                <option value="remote" data-i18n="optBRemote">Room guest</option>
+                <option value="engine" data-i18n="optBEngine">Second engine on this computer</option>
+                <option value="human" data-i18n="optBHuman">Human on this page</option>
+              </select>
+            </div>
+            <div id="b-engine-box" hidden>
+              <div class="row">
+                <label for="b-url" data-i18n="lblBridgeB">Bridge B</label>
+                <input id="b-url" data-persist value="ws://127.0.0.1:8766" spellcheck="false">
+                <button id="b-connect" data-i18n="btnConnect">Connect</button>
+              </div>
+              <div class="hint" id="b-status" data-i18n="bStatusDefault">Not connected.</div>
+            </div>
+            <div class="hint" id="b-remote-status"></div>
+            <div class="grid">
+              <label><span data-i18n="lblBoard">Board</span> <select id="cfg-size" data-persist>
+                <option value="19">19×19</option><option value="13">13×13</option><option value="9">9×9</option>
+              </select></label>
+              <label><span data-i18n="lblKomi">Komi</span> <input id="cfg-komi" data-persist type="number" step="0.5" value="7.5"></label>
+              <label><span data-i18n="lblKoRule">Ko rule</span> <select id="cfg-ko" data-persist>
+                <option value="positional" data-i18n="optKoPos">positional superko</option>
+                <option value="situational" data-i18n="optKoSit">situational superko</option>
+                <option value="simple" data-i18n="optKoSim">simple ko</option>
+              </select></label>
+              <label><span data-i18n="lblGames">Games</span> <input id="cfg-games" data-persist type="number" min="1" max="1000" value="10"></label>
+              <label><span data-i18n="lblTime">Sec / move</span> <input id="cfg-time" data-persist type="number" min="0" step="0.5" value="10" title="0 = unlimited; engines that exceed it lose on time" data-i18n-title="titleTime"></label>
+              <label><span data-i18n="lblMaxMoves">Max moves</span> <input id="cfg-maxmoves" data-persist type="number" min="0" value="0" title="0 = 2 x board points; then scored as is" data-i18n-title="titleMaxMoves"></label>
+              <label><span data-i18n="lblDelay">Delay ms</span> <input id="cfg-delay" data-persist type="number" min="0" step="100" value="0" title="pause after each move, for watching" data-i18n-title="titleDelay"></label>
+              <label class="check"><input type="checkbox" id="cfg-alternate" data-persist checked> <span data-i18n="chkAlternate">alternate colors</span></label>
+            </div>
+            <div class="row">
+              <label for="ref-url" data-i18n="lblReferee">Referee</label>
+              <input id="ref-url" data-persist placeholder="optional bridge for final_score" data-i18n-placeholder="phReferee" spellcheck="false">
+              <button id="ref-connect" data-i18n="btnConnect">Connect</button>
+            </div>
+            <div class="hint" id="ref-status" data-i18n="refStatusDefault">Without a referee, finished games are scored by Tromp-Taylor area counting (dead stones must be captured).</div>
+          </div>
+        </details>
+      </div>
 
-      <details class="card" id="card-log">
-        <summary data-i18n="cardLog">Log</summary>
-        <pre id="log"></pre>
-      </details>
+      <div class="tab-pane" id="pane-results" data-pane="results">
+        <section class="card" id="card-results">
+          <h2 data-i18n="cardResults">Results</h2>
+          <div id="summary" class="summary" data-i18n="summaryEmpty">No games yet.</div>
+          <div class="table-wrap">
+            <table id="results-table">
+              <thead><tr><th data-i18n="thGame">#</th><th data-i18n="thBlack">Black</th><th data-i18n="thWhite">White</th><th data-i18n="thResult">Result</th><th data-i18n="thMoves">Moves</th><th data-i18n="thReason">Reason</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="row buttons">
+            <button id="exp-sgf" data-i18n="btnExpSgf">All games (SGF)</button>
+            <button id="exp-csv" data-i18n="btnExpCsv">CSV</button>
+            <button id="exp-json" data-i18n="btnExpJson">JSON</button>
+            <span class="spacer"></span>
+            <button id="res-clear" class="host-only danger" data-i18n="btnClear">Clear</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="tab-pane" id="pane-log" data-pane="log">
+        <section class="card log-card" id="card-log">
+          <h2 data-i18n="cardLog">Log</h2>
+          <pre id="log"></pre>
+        </section>
+      </div>
     </aside>
   </main>
 

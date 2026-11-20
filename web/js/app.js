@@ -10,10 +10,24 @@ import { LANG_KEY, applyDomTranslations, detectLang, translate } from "./i18n.js
 
 const $ = (id) => document.getElementById(id);
 const STORE = "go-arena.";
+const THEME_KEY = "go-arena.theme";
 const PEER_TIMEOUT_MS = 20000;
+
+function detectTheme() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === "dark" || saved === "light") return saved;
+  } catch {
+    // ignore
+  }
+  return "light";
+}
 
 const app = {
   lang: detectLang(),
+  theme: detectTheme(),
+  tab: "setup",
+  showNumbers: false,
   role: "host", // "host" (also when no room is open) or "guest"
   myBridge: null,
   bBridge: null,
@@ -276,6 +290,7 @@ function startMatch() {
   });
   runner.addEventListener("done", () => log(t("logMatchDone")));
   log(t("logMatchStart", { a: a.label, b: b.label, games: runner.config.games }));
+  setTab("results");
   runner.run().catch((e) => {
     log(t("logMatchError", { msg: e.message }));
     console.error(e);
@@ -574,17 +589,40 @@ function replayFor(cur) {
   return game;
 }
 
+function computeMoveNumbers(board, moves) {
+  if (!app.showNumbers || !moves?.length) return null;
+  const map = new Map();
+  for (let i = 0; i < moves.length; i++) {
+    const mv = String(moves[i][1] ?? "").trim();
+    if (!mv || mv.toLowerCase() === "pass") continue;
+    try {
+      const p = board.fromGtp(mv);
+      if (p >= 0 && board.stones[p] !== 0) map.set(p, i + 1);
+    } catch {
+      // ignore invalid coordinate
+    }
+  }
+  return map;
+}
+
 function renderBoard(v) {
   if (app.review) {
     const { rec, moveNo } = app.review;
     const g = new GameState(rec.size, rec.komi, rec.koRule);
+    const slice = rec.moves.slice(0, moveNo);
     try {
-      for (const [c, mv, ms] of rec.moves.slice(0, moveNo)) g.apply(colorFromLetter(c), mv, ms);
+      for (const [c, mv, ms] of slice) g.apply(colorFromLetter(c), mv, ms);
     } catch (e) {
       console.warn(e);
     }
     const owner = moveNo === rec.moves.length && /Tromp-Taylor/.test(rec.reason) ? g.trompTaylor().owner : null;
-    boardView.render({ size: rec.size, stones: g.board.stones, lastPoint: g.lastPoint, owner });
+    boardView.render({
+      size: rec.size,
+      stones: g.board.stones,
+      lastPoint: g.lastPoint,
+      owner,
+      moveNumbers: computeMoveNumbers(g.board, slice),
+    });
     return;
   }
   const cur = v?.current;
@@ -595,6 +633,7 @@ function renderBoard(v) {
       stones: g.board.stones,
       lastPoint: g.lastPoint,
       owner: cur.owner ? Uint8Array.from(cur.owner) : null,
+      moveNumbers: computeMoveNumbers(g.board, cur.moves),
     });
   } else {
     const size = v?.config?.size ?? (Number($("cfg-size").value) || 19);
@@ -625,6 +664,10 @@ function renderPlayers(v) {
 
 function renderStatus(v) {
   const line = $("status-line");
+  const dot = $("status-dot");
+  if (dot) {
+    dot.className = "status-dot" + (v?.paused ? " paused" : v?.running ? " live" : "");
+  }
   if (app.review) {
     line.textContent = t("statusReviewing", { game: app.review.rec.index + 1, result: app.review.rec.result });
     return;
@@ -654,6 +697,7 @@ function renderControls(v) {
   const host = app.role === "host";
   const running = !!app.runner?.running;
   document.body.classList.toggle("guest", !host);
+  document.body.classList.toggle("reviewing", !!app.review);
   $("m-start").disabled = !host || running;
   $("m-pause").disabled = !running || app.runner.paused;
   $("m-resume").disabled = !running || !app.runner.paused;
@@ -692,6 +736,15 @@ function renderControls(v) {
   const human = activeHuman();
   $("human-controls").hidden = !human || !!app.review;
   boardView.setInteractive(human && !app.review ? colorFromLetter(human.pendingCtx.color) : null);
+
+  const meReady = $("my-kind").value === "human" || !!app.myBridge?.info;
+  const meErr = app.bridgeHintState.my?.kind === "err";
+  $("dot-me").className = "sum-dot" + (meReady ? " ok" : meErr ? " err" : "");
+  $("dot-room").className = "sum-dot" + (app.room ? (app.role === "guest" ? " info" : " ok") : "");
+  const bReady = !!seatBPlayer();
+  const bErr = $("b-kind").value === "engine" && app.bridgeHintState.b?.kind === "err";
+  $("dot-match").className = "sum-dot" + (bReady ? " ok" : bErr ? " err" : "");
+  $("btn-numbers").classList.toggle("active", app.showNumbers);
 }
 
 function renderRoom() {
@@ -724,12 +777,23 @@ function inviteLink() {
 
 function renderResults() {
   const recs = app.records;
+  const decided = recs.filter((r) => !r.void);
+  const pill = $("tab-results-count");
+  if (pill) {
+    pill.textContent = String(decided.length);
+    pill.hidden = decided.length === 0;
+  }
+
   const tbody = $("results-table").querySelector("tbody");
   tbody.replaceChildren();
   for (const r of [...recs].reverse()) {
     const tr = document.createElement("tr");
     const whiteSeat = r.blackSeat === "A" ? "B" : "A";
-    tr.className = r.void ? "void" : r.winnerSeat === "A" ? "win-a" : r.winnerSeat === "B" ? "win-b" : "";
+    const cls = [
+      r.void ? "void" : r.winnerSeat === "A" ? "win-a" : r.winnerSeat === "B" ? "win-b" : "",
+      app.review?.rec === r ? "reviewing" : "",
+    ].filter(Boolean).join(" ");
+    tr.className = cls;
     const cells = [
       String(r.index + 1),
       `${r.blackSeat}`,
@@ -750,29 +814,86 @@ function renderResults() {
   }
 
   const box = $("summary");
-  const decided = recs.filter((r) => !r.void);
+  box.replaceChildren();
   if (!decided.length) {
-    box.textContent = recs.length ? t("summaryVoidOnly") : t("summaryEmpty");
+    const empty = document.createElement("div");
+    empty.className = "summary-empty";
+    empty.textContent = recs.length ? t("summaryVoidOnly") : t("summaryEmpty");
+    box.appendChild(empty);
     return;
   }
+
   const s = summarize(recs);
   const labels = decided[decided.length - 1].labels ?? { A: "A", B: "B" };
   const pct = (x) => `${(100 * x).toFixed(1)}%`;
   const wld = (o) => `${o.w}-${o.l}${o.d ? `-${o.d}` : ""}`;
-  box.replaceChildren();
-  const add = (html, cls = "") => {
-    const div = document.createElement("div");
-    if (cls) div.className = cls;
-    div.textContent = html;
-    box.appendChild(div);
+  const mk = (tag, cls, text = "") => {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text) node.textContent = text;
+    return node;
   };
-  add(`A: ${labels.A}`);
-  add(`B: ${labels.B}`);
-  add(t("summaryLineAB", { a: s.aWins, b: s.bWins, draws: s.draws, games: s.games, voids: s.voids }), "big");
-  add(t("summaryScore", { score: pct(s.score), lo: pct(s.ci[0]), hi: pct(s.ci[1]) }));
-  add(t("summaryElo", { elo: formatElo(s.elo), lo: formatElo(s.eloCi[0]), hi: formatElo(s.eloCi[1]), los: pct(s.los) }));
-  add(t("summaryColors", { asB: wld(s.aAsBlack), asW: wld(s.aAsWhite), bWins: s.blackWins, total: s.blackWins + s.whiteWins }));
-  add(t("summaryTiming", { avgA: (s.avgMs.A / 1000).toFixed(2), avgB: (s.avgMs.B / 1000).toFixed(2), avgLen: Math.round(s.avgLength) }));
+
+  // Visual scoreboard + win-rate bar
+  const sb = mk("div", "scoreboard");
+  const plRow = mk("div", "sb-players");
+  const pA = mk("span", "sb-a", `A: ${labels.A}`);
+  pA.title = labels.A;
+  const pB = mk("span", "sb-b", `B: ${labels.B}`);
+  pB.title = labels.B;
+  plRow.append(pA, pB);
+
+  const scoreRow = mk("div", "sb-score-row");
+  const big = mk("div", "sb-score");
+  big.append(
+    mk("span", "num-a", String(s.aWins)),
+    mk("span", "sep", ":"),
+    mk("span", "num-b", String(s.bWins)),
+  );
+  const metaParts = [t("kpiGamesCount", { n: s.games })];
+  if (s.draws) metaParts.push(t("kpiDraws", { n: s.draws }));
+  if (s.voids) metaParts.push(t("kpiVoids", { n: s.voids }));
+  scoreRow.append(big, mk("span", "sb-meta", metaParts.join(" · ")));
+
+  const bar = mk("div", "winbar");
+  const wA = (s.aWins / s.games) * 100;
+  const wD = (s.draws / s.games) * 100;
+  const wB = (s.bWins / s.games) * 100;
+  const bA = mk("div", "bar-a"); bA.style.width = `${wA}%`;
+  const bD = mk("div", "bar-d"); bD.style.width = `${wD}%`;
+  const bB = mk("div", "bar-b"); bB.style.width = `${wB}%`;
+  bar.append(bA, bD, bB);
+  sb.append(plRow, scoreRow, bar);
+
+  // 2x2 KPI tiles
+  const grid = mk("div", "kpi-grid");
+  const addKpi = (label, val, sub) => {
+    const k = mk("div", "kpi");
+    k.append(mk("div", "kpi-label", label), mk("div", "kpi-val", val), mk("div", "kpi-sub", sub));
+    grid.appendChild(k);
+  };
+  addKpi(t("kpiScore"), pct(s.score), `${pct(s.ci[0])} – ${pct(s.ci[1])}`);
+  addKpi(t("kpiElo"), formatElo(s.elo), `${formatElo(s.eloCi[0])} – ${formatElo(s.eloCi[1])}`);
+  addKpi(
+    t("kpiLos"),
+    pct(s.los),
+    `${t("kpiColorSplit", { asB: wld(s.aAsBlack), asW: wld(s.aAsWhite) })} · ${t("kpiBlackWon", { bWins: s.blackWins, total: s.blackWins + s.whiteWins })}`,
+  );
+  addKpi(
+    t("kpiPace"),
+    t("kpiPaceVal", { avgA: (s.avgMs.A / 1000).toFixed(2), avgB: (s.avgMs.B / 1000).toFixed(2) }),
+    t("kpiAvgMoves", { n: Math.round(s.avgLength) }),
+  );
+
+  // Accessible plain-text summary (preserves screen-reader & test readability)
+  const sr = mk("div", "sr-summary");
+  sr.textContent = [
+    t("summaryLineAB", { a: s.aWins, b: s.bWins, draws: s.draws, games: s.games, voids: s.voids }),
+    t("summaryScore", { score: pct(s.score), lo: pct(s.ci[0]), hi: pct(s.ci[1]) }),
+    t("summaryElo", { elo: formatElo(s.elo), lo: formatElo(s.eloCi[0]), hi: formatElo(s.eloCi[1]), los: pct(s.los) }),
+  ].join(" · ");
+
+  box.append(sb, grid, sr);
 }
 
 function openReview(rec) {
@@ -782,6 +903,15 @@ function openReview(rec) {
   const slider = $("review-slider");
   slider.max = String(rec.moves.length);
   slider.value = String(rec.moves.length);
+  renderResults();
+  update();
+}
+
+function stepReview(moveNo) {
+  if (!app.review) return;
+  const max = app.review.rec.moves.length;
+  app.review.moveNo = Math.max(0, Math.min(max, moveNo));
+  $("review-slider").value = String(app.review.moveNo);
   update();
 }
 
@@ -807,6 +937,38 @@ function update() {
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
+function applyTheme() {
+  document.documentElement.dataset.theme = app.theme;
+  const btn = $("theme-toggle");
+  if (btn) {
+    const label = t(app.theme === "dark" ? "themeToLight" : "themeToDark");
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
+}
+
+function setTheme(theme) {
+  app.theme = theme === "dark" ? "dark" : "light";
+  try {
+    localStorage.setItem(THEME_KEY, app.theme);
+  } catch {
+    // ignore
+  }
+  applyTheme();
+}
+
+function setTab(name) {
+  app.tab = name;
+  for (const btn of document.querySelectorAll(".tab[data-tab]")) {
+    const active = btn.dataset.tab === name;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  for (const pane of document.querySelectorAll(".tab-pane[data-pane]")) {
+    pane.classList.toggle("active", pane.dataset.pane === name);
+  }
+}
+
 function setLanguage(lang) {
   app.lang = lang === "zh" ? "zh" : "en";
   try {
@@ -815,6 +977,7 @@ function setLanguage(lang) {
     // ignore storage errors
   }
   applyDomTranslations(document, app.lang);
+  applyTheme();
   refreshBridgeHints();
   if (app.runner?.running) {
     app.runner.setSeat("A", myPlayer() || app.runner.seats.A);
@@ -846,6 +1009,8 @@ function onBoardClick(point) {
 function init() {
   restoreInputs();
   applyDomTranslations(document, app.lang);
+  applyTheme();
+  setTab(app.tab);
   boardView = new BoardView($("board"), { onClick: onBoardClick });
 
   const hash = new URLSearchParams(location.hash.slice(1));
@@ -859,6 +1024,14 @@ function init() {
   if (app.records.length) log(t("logRestoredGames", { n: app.records.length }));
 
   $("lang-toggle").onclick = () => setLanguage(app.lang === "zh" ? "en" : "zh");
+  $("theme-toggle").onclick = () => setTheme(app.theme === "dark" ? "light" : "dark");
+  $("btn-numbers").onclick = () => {
+    app.showNumbers = !app.showNumbers;
+    update();
+  };
+  for (const btn of document.querySelectorAll(".tab[data-tab]")) {
+    btn.onclick = () => setTab(btn.dataset.tab);
+  }
   $("my-connect").onclick = () => connectBridge("my");
   $("b-connect").onclick = () => connectBridge("b");
   $("ref-connect").onclick = () => connectBridge("ref");
@@ -907,16 +1080,26 @@ function init() {
   };
   for (const h of [app.myHuman, app.bHuman]) h.addEventListener("turn", update);
 
-  $("review-slider").oninput = (e) => {
-    if (!app.review) return;
-    app.review.moveNo = Number(e.target.value);
-    update();
-  };
+  $("review-slider").oninput = (e) => stepReview(Number(e.target.value));
+  $("review-first").onclick = () => stepReview(0);
+  $("review-prev").onclick = () => app.review && stepReview(app.review.moveNo - 1);
+  $("review-next").onclick = () => app.review && stepReview(app.review.moveNo + 1);
+  $("review-last").onclick = () => app.review && stepReview(app.review.rec.moves.length);
   $("review-close").onclick = () => {
     app.review = null;
     $("review-bar").hidden = true;
+    renderResults();
     update();
   };
+  document.addEventListener("keydown", (e) => {
+    if (!app.review) return;
+    if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
+    if (e.key === "ArrowLeft") { e.preventDefault(); stepReview(app.review.moveNo - 1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); stepReview(app.review.moveNo + 1); }
+    else if (e.key === "Home") { e.preventDefault(); stepReview(0); }
+    else if (e.key === "End") { e.preventDefault(); stepReview(app.review.rec.moves.length); }
+    else if (e.key === "Escape") $("review-close").click();
+  });
   $("review-sgf").onclick = () => app.review && download(`go-arena-game${app.review.rec.index + 1}.sgf`, recordToSgf(app.review.rec), "application/x-go-sgf");
 
   $("exp-sgf").onclick = () => {
