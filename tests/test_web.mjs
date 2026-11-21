@@ -7,6 +7,8 @@ import { recordToSgf, recordsToCsv } from "../web/js/sgf.js";
 import { readFileSync } from "node:fs";
 import { MatchRunner, parseScore } from "../web/js/match.js";
 import { DICT, detectLang, translate } from "../web/js/i18n.js";
+import { EnginePlayer, engineLabel } from "../web/js/players.js";
+import { DEFAULT_ICE, parseIceServers, encodeIceParam, decodeIceParam } from "../web/js/net.js";
 
 test("GTP coordinates skip I and round-trip", () => {
   const b = new Board(19);
@@ -191,4 +193,31 @@ test("i18n dictionary covers all HTML keys in both en and zh", () => {
   assert.equal(detectLang({ getItem: () => null }, { language: "zh-CN" }), "zh");
   assert.equal(detectLang({ getItem: () => null }, { language: "en-US" }), "en");
   assert.ok(translate("zh", "captures", { n: 3 }).includes("3"));
+});
+
+test("engine labels hide engine and model names", () => {
+  const secretInfo = { name: "KataGo", version: "1.18.2+tf3-b11c768-s12382M-d6533M" };
+  assert.equal(engineLabel(secretInfo), "AI");
+  const player = new EnginePlayer({ info: secretInfo }, "Host");
+  assert.equal(player.label, "Host (AI)");
+  assert.ok(!player.label.includes("KataGo"));
+  assert.ok(!player.label.includes("tf3"));
+  assert.equal(new EnginePlayer({ info: secretInfo }).label, "AI");
+});
+
+test("DEFAULT_ICE omits dead PeerJS TURN domains and ICE link params round-trip", () => {
+  const flatUrls = DEFAULT_ICE.flatMap((e) => (Array.isArray(e.urls) ? e.urls : [e.urls]));
+  assert.ok(flatUrls.some((u) => u.includes("stun.miwifi.com")));
+  assert.ok(flatUrls.some((u) => u.includes("stun.chat.bilibili.com")));
+  assert.ok(!flatUrls.some((u) => u.includes("turn.peerjs.com")));
+
+  assert.equal(parseIceServers("   "), null);
+  assert.throws(() => parseIceServers("{}"));
+  assert.throws(() => parseIceServers('[{"username":"a"}]'));
+
+  const sample = '[\n  { "urls": "turn:relay.example.com:443?transport=tcp", "username": "u", "credential": "p" }\n]';
+  const encoded = encodeIceParam(sample);
+  assert.ok(!encoded.includes("\n"));
+  const decoded = decodeIceParam(encoded);
+  assert.deepEqual(JSON.parse(decoded), [{ urls: "turn:relay.example.com:443?transport=tcp", username: "u", credential: "p" }]);
 });

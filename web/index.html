@@ -137,6 +137,7 @@
                 <label class="check"><input type="checkbox" id="join-watch"> <span data-i18n="chkWatchOnly">watch only</span></label>
                 <button id="room-join" data-i18n="btnJoin">Join</button>
               </div>
+              <div class="hint" id="room-idle-status" hidden></div>
             </div>
             <div id="room-active" hidden>
               <div class="row">
@@ -154,9 +155,9 @@
                 <label for="net-signal" data-i18n="lblSignal">Signaling</label>
                 <input id="net-signal" data-persist placeholder="default: PeerJS cloud (0.peerjs.com)" data-i18n-placeholder="phSignal" spellcheck="false">
               </div>
-              <label for="net-ice" class="block" data-i18n="lblIce">ICE servers (JSON, empty = built-in STUN + PeerJS TURN)</label>
+              <label for="net-ice" class="block" data-i18n="lblIce">ICE servers (JSON, empty = built-in STUN)</label>
               <textarea id="net-ice" data-persist rows="3" spellcheck="false" placeholder='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'></textarea>
-              <div class="hint" data-i18n="netHint">Both sides must use the same signaling server. A custom one is added to the invite link.</div>
+              <div class="hint" data-i18n="netHint">Both sides must use the same signaling server. Custom signaling and ICE settings are included in the invite link.</div>
             </details>
           </div>
         </details>

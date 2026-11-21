@@ -1,9 +1,9 @@
 // go-arena page controller: wires players, the room, the match runner and the UI.
 import { BoardView } from "./board.js";
 import { GameState, Board, colorFromLetter } from "./go.js";
-import { BridgeClient, EnginePlayer, HumanPlayer, RemotePlayer, Cancelled, engineLabel } from "./players.js";
+import { BridgeClient, EnginePlayer, HumanPlayer, RemotePlayer, Cancelled } from "./players.js";
 import { MatchRunner } from "./match.js";
-import { HostRoom, GuestRoom, normalizeCode } from "./net.js";
+import { HostRoom, GuestRoom, normalizeCode, parseIceServers, encodeIceParam, decodeIceParam } from "./net.js";
 import { summarize, formatElo } from "./stats.js";
 import { recordToSgf, recordsToSgfCollection, recordsToCsv } from "./sgf.js";
 import { LANG_KEY, applyDomTranslations, detectLang, translate } from "./i18n.js";
@@ -130,17 +130,18 @@ function readConfig() {
 }
 
 function netSettings() {
-  const text = $("net-ice").value.trim();
-  let iceServers = null;
-  if (text) {
-    try {
-      iceServers = JSON.parse(text);
-      if (!Array.isArray(iceServers)) throw new Error("not an array");
-    } catch (e) {
-      throw new Error(`ICE servers must be a JSON array (${e.message})`);
-    }
-  }
-  return { signalUrl: $("net-signal").value.trim(), iceServers };
+  return {
+    signalUrl: $("net-signal").value.trim(),
+    iceServers: parseIceServers($("net-ice").value),
+  };
+}
+
+function setRoomIdleHint(text = "", kind = "") {
+  const node = $("room-idle-status");
+  if (!node) return;
+  node.hidden = !text;
+  node.textContent = text;
+  node.className = `hint ${kind}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +154,7 @@ function myName() {
 function myLabel() {
   if ($("my-kind").value === "human") return `${myName()} (${t("humanSuffix")})`;
   const info = app.myBridge?.info;
-  return info ? `${myName()} (${engineLabel(info)})` : `${myName()} (${t("noEngineSuffix")})`;
+  return info ? `${myName()} (${t("engineSuffix")})` : `${myName()} (${t("noEngineSuffix")})`;
 }
 
 function myPlayer() {
@@ -161,7 +162,7 @@ function myPlayer() {
     app.myHuman.owner = myName();
     return app.myHuman;
   }
-  return app.myBridge?.info ? new EnginePlayer(app.myBridge, myName()) : null;
+  return app.myBridge?.info ? new EnginePlayer(app.myBridge, myName(), t("engineSuffix")) : null;
 }
 
 function seatBPlayer() {
@@ -169,7 +170,7 @@ function seatBPlayer() {
     case "remote":
       return app.remote?.player ?? null;
     case "engine":
-      return app.bBridge?.info ? new EnginePlayer(app.bBridge, t("localBName")) : null;
+      return app.bBridge?.info ? new EnginePlayer(app.bBridge, t("localBName"), t("engineSuffix")) : null;
     default:
       app.bHuman.owner = t("localBName");
       return app.bHuman;
@@ -181,7 +182,7 @@ function seatBLabel() {
     case "remote":
       return app.remote?.player.label ?? t("waitingGuestLabel");
     case "engine":
-      return app.bBridge?.info ? `${t("localBName")} (${engineLabel(app.bBridge.info)})` : t("engineBNotConn");
+      return app.bBridge?.info ? `${t("localBName")} (${t("engineSuffix")})` : t("engineBNotConn");
     default:
       app.bHuman.owner = t("localBName");
       return `${t("localBName")} (${t("humanSuffix")})`;
@@ -224,7 +225,7 @@ function refreshBridgeHints() {
     else if (st.key === "bridgeConnected") {
       const info = app[BRIDGES[which].key]?.info;
       const extra = which === "ref" && info && !info.commands?.includes("final_score") ? t("bridgeNoScore") : "";
-      setHint(BRIDGES[which].status, t("bridgeConnected", { label: st.vars.label, extra }), st.kind);
+      setHint(BRIDGES[which].status, t("bridgeConnected", { label: t("bridgeReadyLabel"), extra }), st.kind);
     } else {
       setHint(BRIDGES[which].status, t(st.key, st.vars), st.kind);
     }
@@ -244,7 +245,7 @@ async function connectBridge(which) {
     setBridgeHint(which, "bridgeWaitStart");
     const info = await client.hello();
     app[spec.key] = client;
-    const label = engineLabel(info);
+    const label = t("bridgeReadyLabel");
     const extra = which === "ref" && !info.commands?.includes("final_score") ? t("bridgeNoScore") : "";
     setBridgeHint(which, "bridgeConnected", { label, extra }, "ok");
     log(t("logBridgeConnected", { url, label }));
@@ -272,7 +273,7 @@ function startMatch() {
   if (!a) return log(t("logNeedSeatA"));
   if (!b) return log(t("logNeedSeatB"));
   if (app.records.length && !confirm(t("confirmNewMatch"))) return;
-  const referee = app.refBridge?.info ? new EnginePlayer(app.refBridge, "referee") : null;
+  const referee = app.refBridge?.info ? new EnginePlayer(app.refBridge, "referee", t("engineSuffix")) : null;
   const runner = new MatchRunner(readConfig(), { A: a, B: b }, { referee });
   app.runner = runner;
   app.records = [];
@@ -329,15 +330,19 @@ async function createRoom() {
   try {
     settings = netSettings();
   } catch (e) {
+    setRoomIdleHint(e.message, "err");
     return setHint("room-status", e.message, "err");
   }
+  setRoomIdleHint();
   const room = new HostRoom();
+  room.addEventListener("diag", (e) => log(e.detail));
   $("room-create").disabled = true;
   log(t("logOpeningRoom"));
   try {
     await room.open(settings);
   } catch (e) {
     $("room-create").disabled = false;
+    setRoomIdleHint(e.message, "err");
     log(t("logOpenRoomFail", { msg: e.message }));
     return;
   }
@@ -440,24 +445,35 @@ function onPeerLeft(conn) {
 // ---------------------------------------------------------------------------
 async function joinRoom() {
   const code = normalizeCode($("join-code").value);
-  if (!code) return log(t("logEnterCode"));
+  if (!code) {
+    setRoomIdleHint(t("logEnterCode"), "err");
+    return log(t("logEnterCode"));
+  }
   let settings;
   try {
     settings = netSettings();
   } catch (e) {
+    setRoomIdleHint(e.message, "err");
     return log(e.message);
   }
-  if (app.runner?.running) return log(t("logStopFirst"));
+  if (app.runner?.running) {
+    setRoomIdleHint(t("logStopFirst"), "err");
+    return log(t("logStopFirst"));
+  }
+  setRoomIdleHint(t("logJoining", { code }));
   const room = new GuestRoom();
+  room.addEventListener("diag", (e) => log(e.detail));
   $("room-join").disabled = true;
   log(t("logJoining", { code }));
   try {
     await room.join(settings, code);
   } catch (e) {
     $("room-join").disabled = false;
+    setRoomIdleHint(e.message, "err");
     log(t("logJoinFail", { msg: e.message }));
     return;
   }
+  setRoomIdleHint();
   $("room-join").disabled = false;
   app.room = room;
   app.role = "guest";
@@ -772,6 +788,12 @@ function inviteLink() {
   const params = new URLSearchParams({ room: app.room.code });
   const sig = $("net-signal").value.trim();
   if (sig) params.set("sig", sig);
+  try {
+    const ice = encodeIceParam($("net-ice").value);
+    if (ice) params.set("ice", ice);
+  } catch (e) {
+    log(t("logInviteNetBad", { msg: e.message }));
+  }
   return `${location.origin}${location.pathname}#${params}`;
 }
 
@@ -1016,8 +1038,26 @@ function init() {
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.get("room")) {
     $("join-code").value = hash.get("room");
-    if (hash.get("sig")) $("net-signal").value = hash.get("sig");
+    let loadedNet = false;
+    if (hash.get("sig")) {
+      $("net-signal").value = hash.get("sig");
+      localStorage.setItem(`${STORE}ui.net-signal`, $("net-signal").value);
+      loadedNet = true;
+    }
+    if (hash.get("ice")) {
+      try {
+        const prettyIce = decodeIceParam(hash.get("ice"));
+        if (prettyIce) {
+          $("net-ice").value = prettyIce;
+          localStorage.setItem(`${STORE}ui.net-ice`, prettyIce);
+          loadedNet = true;
+        }
+      } catch (e) {
+        log(t("logInviteNetBad", { msg: e.message }));
+      }
+    }
     log(t("logInviteRestored", { room: hash.get("room") }));
+    if (loadedNet) log(t("logInviteNetLoaded"));
   }
 
   app.records = loadRecords();
