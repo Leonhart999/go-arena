@@ -183,16 +183,18 @@ export class Board {
     }
   }
 
-  // Tromp-Taylor area count (no komi). Every stone counts as alive; an empty
-  // region counts for a color only if it touches stones of that color alone.
-  areaScore() {
+  // Tromp-Taylor area count (no komi). Stones in deadSet (optional Set/Array of
+  // point indices) are treated as removed/empty before counting territory.
+  areaScore(deadSet = null) {
     const n = this.stones.length;
+    const dead = deadSet ? (deadSet instanceof Set ? deadSet : new Set(deadSet)) : null;
     const owner = new Uint8Array(n);
     const seen = new Uint8Array(n);
+    const eff = (p) => (dead && dead.has(p) ? EMPTY : this.stones[p]);
     let black = 0;
     let white = 0;
     for (let i = 0; i < n; i++) {
-      const s = this.stones[i];
+      const s = eff(i);
       if (s !== EMPTY) {
         owner[i] = s;
         if (s === BLACK) black++;
@@ -208,7 +210,7 @@ export class Board {
         const p = stack.pop();
         region.push(p);
         for (const q of this.nbrs[p]) {
-          const t = this.stones[q];
+          const t = eff(q);
           if (t === EMPTY) {
             if (!seen[q]) {
               seen[q] = 1;
@@ -229,7 +231,7 @@ export class Board {
 
 // One game in progress: board plus move list, with strict color alternation.
 export class GameState {
-  constructor(size, komi, koRule = "positional") {
+  constructor(size, komi, koRule = "positional", initialMoves = null) {
     this.size = size;
     this.komi = komi;
     this.koRule = koRule;
@@ -238,16 +240,19 @@ export class GameState {
     this.toPlay = BLACK;
     this.consecutivePasses = 0;
     this.lastPoint = null;
+    if (Array.isArray(initialMoves) && initialMoves.length) {
+      for (const [c, v, ms] of initialMoves) this.apply(colorFromLetter(c), v, ms ?? 0);
+    }
   }
 
   static fromMoves(size, komi, koRule, moves) {
-    const g = new GameState(size, komi, koRule);
-    for (const [c, v, ms] of moves) g.apply(colorFromLetter(c), v, ms);
-    return g;
+    return new GameState(size, komi, koRule, moves);
   }
 
-  apply(color, vertex, ms = 0) {
-    if (color !== this.toPlay) throw new IllegalMove(`it is ${colorLetter(this.toPlay)}'s turn`);
+  // Apply a move; when allowSameColor is true, permits non-alternating sequences
+  // (e.g., SGF setup stones converted into moves).
+  apply(color, vertex, ms = 0, { allowSameColor = false } = {}) {
+    if (!allowSameColor && color !== this.toPlay) throw new IllegalMove(`it is ${colorLetter(this.toPlay)}'s turn`);
     const point = this.board.fromGtp(vertex);
     this.board.play(color, point);
     this.moves.push([colorLetter(color), this.board.toGtp(point), Math.round(ms)]);
@@ -258,8 +263,8 @@ export class GameState {
   }
 
   // Black minus white by Tromp-Taylor area count, komi included.
-  trompTaylor() {
-    const { black, white, owner } = this.board.areaScore();
+  trompTaylor(deadSet = null) {
+    const { black, white, owner } = this.board.areaScore(deadSet);
     return { black, white, owner, diff: black - white - this.komi };
   }
 }

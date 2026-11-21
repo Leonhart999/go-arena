@@ -72,8 +72,14 @@
         <span id="status-line" data-i18n="statusIdle">Idle</span>
         <span class="spacer"></span>
         <span id="human-controls" class="btn-group" hidden>
+          <button id="btn-undo" data-i18n="btnUndo" data-i18n-title="titleUndo" title="Undo last move" hidden>Undo</button>
           <button id="btn-pass" data-i18n="btnPass">Pass</button>
           <button id="btn-resign" class="danger" data-i18n="btnResign">Resign</button>
+        </span>
+        <span id="dead-controls" class="btn-group" hidden>
+          <span id="dead-preview" class="dead-preview"></span>
+          <button id="btn-dead-confirm" class="primary" data-i18n="btnDeadConfirm">Confirm score</button>
+          <button id="btn-dead-resume" data-i18n="btnDeadResume">Resume play</button>
         </span>
         <button id="btn-territory" class="chip-btn" type="button" data-i18n="btnTerritory" data-i18n-title="titleTerritory" title="Show territory estimate">Territory</button>
         <button id="btn-candidates" class="chip-btn" type="button" data-i18n="btnCandidates" data-i18n-title="titleCandidates" title="Show AI recommended moves & PV on hover">AI Moves</button>
@@ -81,17 +87,35 @@
       </div>
 
       <div id="review-bar" class="review-bar" hidden>
-        <span id="review-title" class="review-title"></span>
-        <div class="review-steps">
-          <button id="review-first" class="step-btn" type="button" data-i18n-title="titleReviewFirst" title="First move (Home)">&#x23EE;</button>
-          <button id="review-prev" class="step-btn" type="button" data-i18n-title="titleReviewPrev" title="Previous move (Left)">&#x25C0;</button>
-          <input id="review-slider" type="range" min="0" max="0" value="0">
-          <button id="review-next" class="step-btn" type="button" data-i18n-title="titleReviewNext" title="Next move (Right)">&#x25B6;</button>
-          <button id="review-last" class="step-btn" type="button" data-i18n-title="titleReviewLast" title="Last move (End)">&#x23ED;</button>
+        <div class="review-row">
+          <span id="review-title" class="review-title"></span>
+          <div class="review-steps">
+            <button id="review-first" class="step-btn" type="button" data-i18n-title="titleReviewFirst" title="First move (Home)">&#x23EE;</button>
+            <button id="review-prev10" class="step-btn" type="button" data-i18n-title="titleReviewPrev10" title="Back 10 moves (Shift+Left)">-10</button>
+            <button id="review-prev" class="step-btn" type="button" data-i18n-title="titleReviewPrev" title="Previous move (Left)">&#x25C0;</button>
+            <button id="review-play" class="step-btn" type="button" data-i18n-title="titleReviewPlay" title="Auto-play (Space)">&#x25B6;&#xFE0E;</button>
+            <input id="review-slider" type="range" min="0" max="0" value="0">
+            <button id="review-next" class="step-btn" type="button" data-i18n-title="titleReviewNext" title="Next move (Right)">&#x25B6;</button>
+            <button id="review-next10" class="step-btn" type="button" data-i18n-title="titleReviewNext10" title="Forward 10 moves (Shift+Right)">+10</button>
+            <button id="review-last" class="step-btn" type="button" data-i18n-title="titleReviewLast" title="Last move (End)">&#x23ED;</button>
+          </div>
+          <select id="review-speed" class="review-speed" data-i18n-title="titleReviewSpeed" title="Auto-play speed">
+            <option value="1200">0.5x</option>
+            <option value="650" selected>1x</option>
+            <option value="300">2x</option>
+          </select>
+          <span id="review-move" class="review-move"></span>
         </div>
-        <span id="review-move" class="review-move"></span>
-        <button id="review-sgf" data-i18n="btnSgf">SGF</button>
-        <button id="review-close" class="primary-soft" data-i18n="btnBackLive">Back to live</button>
+        <div class="review-row review-actions">
+          <button id="review-try" class="chip-btn" type="button" data-i18n="btnReviewTry" data-i18n-title="titleReviewTry" title="Explore variations by clicking the board">Try variation</button>
+          <button id="review-try-undo" type="button" data-i18n="btnReviewTryUndo" hidden>Undo move</button>
+          <button id="review-try-reset" type="button" data-i18n="btnReviewTryReset" hidden>Back to main line</button>
+          <span id="review-var-badge" class="var-badge" hidden></span>
+          <span class="spacer"></span>
+          <button id="review-resume" class="host-only" type="button" data-i18n="btnResumeHere" data-i18n-title="titleResumeHere" title="Start a match continuing from this board position">Play from here</button>
+          <button id="review-sgf" type="button" data-i18n="btnSgf">SGF</button>
+          <button id="review-close" class="primary-soft" type="button" data-i18n="btnBackLive">Back to live</button>
+        </div>
       </div>
     </section>
 
@@ -243,9 +267,14 @@
             <span data-i18n="cardAnalysis">Live Analysis</span>
             <span id="eval-busy-dot" class="eval-busy-dot" hidden aria-label="Analyzing"></span>
             <span class="spacer"></span>
+            <button id="btn-analyze-full" class="mini-btn" type="button" data-i18n="btnAnalyzeFull" data-i18n-title="titleAnalyzeFull" title="Analyze every move of the game">Full game</button>
             <button id="btn-analyze-now" class="mini-btn" type="button" data-i18n="btnAnalyzeNow">Analyze</button>
           </h2>
           <div class="card-body">
+            <div id="full-eval-bar" class="full-eval-bar" hidden>
+              <span id="full-eval-text"></span>
+              <div class="full-eval-track"><div id="full-eval-fill" class="full-eval-fill"></div></div>
+            </div>
             <div class="eval-summary-row">
               <div class="eval-kpi">
                 <div class="eval-kpi-label" data-i18n="lblEvalWinrate">Black Winrate</div>
@@ -302,11 +331,14 @@
             </table>
           </div>
           <div class="row buttons">
-            <button id="exp-sgf" data-i18n="btnExpSgf">All games (SGF)</button>
-            <button id="exp-csv" data-i18n="btnExpCsv">CSV</button>
-            <button id="exp-json" data-i18n="btnExpJson">JSON</button>
+            <input id="imp-sgf-file" type="file" accept=".sgf,.txt" hidden>
+            <button id="imp-sgf" class="primary-soft" type="button" data-i18n="btnImpSgf" data-i18n-title="titleImpSgf" title="Import local .sgf file (or drag and drop onto the page)">Import SGF</button>
+            <button id="imp-sgf-paste" type="button" data-i18n="btnImpSgfPaste">Paste SGF</button>
             <span class="spacer"></span>
-            <button id="res-clear" class="host-only danger" data-i18n="btnClear">Clear</button>
+            <button id="exp-sgf" type="button" data-i18n="btnExpSgf">All games (SGF)</button>
+            <button id="exp-csv" type="button" data-i18n="btnExpCsv">CSV</button>
+            <button id="exp-json" type="button" data-i18n="btnExpJson">JSON</button>
+            <button id="res-clear" class="host-only danger" type="button" data-i18n="btnClear">Clear</button>
           </div>
         </section>
       </div>

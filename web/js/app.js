@@ -1,11 +1,11 @@
 // go-arena page controller: wires players, the room, the match runner and the UI.
 import { BoardView } from "./board.js";
-import { GameState, Board, colorFromLetter, formatScore } from "./go.js";
+import { GameState, Board, colorFromLetter, colorLetter, formatScore } from "./go.js";
 import { BridgeClient, EnginePlayer, HumanPlayer, RemotePlayer, Cancelled, engineLabel } from "./players.js";
 import { MatchRunner } from "./match.js";
 import { HostRoom, GuestRoom, normalizeCode, parseIceServers, encodeIceParam, decodeIceParam } from "./net.js";
 import { summarize, formatElo } from "./stats.js";
-import { recordToSgf, recordsToSgfCollection, recordsToCsv } from "./sgf.js";
+import { recordToSgf, recordsToSgfCollection, recordsToCsv, parseSgfCollection } from "./sgf.js";
 import { LANG_KEY, applyDomTranslations, detectLang, translate } from "./i18n.js";
 import { AnalysisManager, detectBlunders, formatScoreLead, stripForRecord } from "./analysis.js";
 import { AnalysisChart } from "./chart.js";
@@ -36,6 +36,7 @@ const app = {
   sound: new SoundEffects(),
   analyzer: new AnalysisManager(),
   analysisBusy: false,
+  fullEval: null, // { abort: bool, cur: number, total: number, key: string }
   liveAnalysis: new Map(), // gameKey -> Map<moveNo, entry>
   role: "host", // "host" (also when no room is open) or "guest"
   myBridge: null,
@@ -48,11 +49,12 @@ const app = {
   remote: null, // host: { conn, player } of the guest in seat B
   peers: new Map(), // host: conn -> { label, kind, want, role, lastSeen }
   runner: null,
+  deadScoring: null, // { game, dead: Set<number>, resolve } when human players mark dead stones
   records: [],
   view: null, // guest: latest state from the host
   viewAt: 0,
   lastSoundMoveKey: "",
-  review: null, // { rec, moveNo }
+  review: null, // { rec, moveNo, tryMode, variation: [[c, v, ms]], varEval: entry|null, playTimer }
   guestReq: null, // guest: { req, player } being answered
   mySeat: null,
   pingTimer: null,
@@ -406,6 +408,40 @@ function scheduleLiveAnalysis(cur) {
   });
 }
 
+function buildReviewGame(review) {
+  const { rec, moveNo, variation } = review;
+  const g = new GameState(rec.size, rec.komi, rec.koRule);
+  const mainSlice = rec.moves.slice(0, moveNo);
+  try {
+    for (const [c, mv, ms] of mainSlice) g.apply(colorFromLetter(c), mv, ms ?? 0, { allowSameColor: true });
+    for (const [c, mv, ms] of variation) g.apply(colorFromLetter(c), mv, ms ?? 0);
+  } catch (e) {
+    console.warn("review replay failed", e);
+  }
+  return { g, mainSlice };
+}
+
+function triggerVariationAnalysis() {
+  if (!app.review || !app.review.variation.length || !app.analyzer.capable) return;
+  const cfg = readAnalysisConfig();
+  const { rec, moveNo, variation } = app.review;
+  const allMoves = rec.moves.slice(0, moveNo).concat(variation);
+  const { g } = buildReviewGame(app.review);
+  const toPlay = colorLetter(g.toPlay);
+  app.analyzer.request({
+    gameKey: `var:${gameKeyOf(rec)}:${moveNo}:${variation.length}`,
+    moveNo: allMoves.length,
+    size: rec.size,
+    komi: rec.komi,
+    color: toPlay,
+    moves: allMoves,
+    maxTimeMs: Math.max(cfg.maxTimeMs, 600),
+    maxVisits: cfg.maxVisits,
+    maxMoves: 5,
+    includeOwnership: true,
+  });
+}
+
 function triggerManualAnalysis() {
   if (!app.analyzer.capable) {
     log(t("logAnalyzeNeedBridge"));
@@ -413,16 +449,20 @@ function triggerManualAnalysis() {
   }
   const cfg = readAnalysisConfig();
   if (app.review) {
+    if (app.review.variation.length) {
+      triggerVariationAnalysis();
+      return;
+    }
     const { rec, moveNo } = app.review;
-    const slice = rec.moves.slice(0, moveNo);
-    const toPlay = moveNo % 2 === 0 ? "B" : "W";
+    const { g, mainSlice } = buildReviewGame(app.review);
+    const toPlay = colorLetter(g.toPlay);
     app.analyzer.request({
       gameKey: gameKeyOf(rec),
       moveNo,
       size: rec.size,
       komi: rec.komi,
       color: toPlay,
-      moves: slice,
+      moves: mainSlice,
       maxTimeMs: Math.max(cfg.maxTimeMs, 800),
       maxVisits: cfg.maxVisits,
       maxMoves: 5,
@@ -449,27 +489,197 @@ function triggerManualAnalysis() {
   });
 }
 
+function stopFullAnalysis() {
+  if (!app.fullEval) return;
+  app.fullEval.abort = true;
+  app.analyzer.cancel();
+}
+
+async function toggleFullGameAnalysis() {
+  if (app.fullEval) {
+    stopFullAnalysis();
+    return;
+  }
+  if (!app.analyzer.capable) {
+    log(t("logAnalyzeNeedBridge"));
+    return;
+  }
+  const rec = app.review?.rec ?? null;
+  const cur = !rec ? currentView()?.current : null;
+  const target = rec || cur;
+  if (!target || !target.moves?.length) return;
+
+  const cfg = readAnalysisConfig();
+  const key = gameKeyOf(target);
+  const total = target.moves.length;
+  const state = { abort: false, cur: 0, total, key };
+  app.fullEval = state;
+  app.analyzer.cancel();
+  renderAnalysis(currentView());
+
+  try {
+    const existing = getGameEvalMap(key, true);
+    if (rec && Array.isArray(rec.analysis)) {
+      for (const item of rec.analysis) {
+        if (item && Number.isInteger(item.moveNo)) existing.set(item.moveNo, item);
+      }
+    }
+    const g = new GameState(target.size, target.komi, target.koRule || "positional");
+    for (let m = 0; m <= total; m++) {
+      if (state.abort || !app.analyzer.capable) break;
+      state.cur = m;
+      renderFullEvalBar();
+      const slice = target.moves.slice(0, m);
+      if (m > 0) {
+        const [c, v, ms] = target.moves[m - 1];
+        try {
+          g.apply(colorFromLetter(c), v, ms ?? 0, { allowSameColor: true });
+        } catch {
+          // keep going on imported setup positions
+        }
+      }
+      const prev = existing.get(m);
+      if (prev && prev.visits >= Math.max(1, cfg.maxVisits || 1) && prev.moves?.length) {
+        continue;
+      }
+      try {
+        await app.analyzer.analyzeOnce({
+          gameKey: key,
+          moveNo: m,
+          size: target.size,
+          komi: target.komi,
+          color: colorLetter(g.toPlay),
+          moves: slice,
+          maxTimeMs: cfg.maxTimeMs,
+          maxVisits: cfg.maxVisits,
+          maxMoves: 5,
+          includeOwnership: m === total || (app.review?.moveNo === m),
+        });
+      } catch (e) {
+        if (!state.abort) log(t("logAnalyzeErr", { msg: e.message }));
+        break;
+      }
+    }
+    if (state.abort) log(t("logFullEvalStopped"));
+    else log(t("logFullEvalDone", { n: total }));
+  } finally {
+    if (app.fullEval === state) app.fullEval = null;
+    update();
+  }
+}
+
+function renderFullEvalBar() {
+  const bar = $("full-eval-bar");
+  const btn = $("btn-analyze-full");
+  if (btn) {
+    btn.textContent = app.fullEval ? t("btnAnalyzeStop") : t("btnAnalyzeFull");
+    btn.classList.toggle("danger", !!app.fullEval);
+  }
+  if (!bar) return;
+  bar.hidden = !app.fullEval;
+  if (app.fullEval) {
+    const pct = app.fullEval.total ? Math.round((app.fullEval.cur / app.fullEval.total) * 100) : 0;
+    $("full-eval-text").textContent = t("fullEvalProgress", { cur: app.fullEval.cur, total: app.fullEval.total });
+    $("full-eval-fill").style.width = `${pct}%`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SGF import & resume from review position
+// ---------------------------------------------------------------------------
+function importSgfText(text) {
+  let imported;
+  try {
+    imported = parseSgfCollection(text, app.records.length);
+  } catch (e) {
+    log(t("logImpSgfFail", { msg: e.message }));
+    return;
+  }
+  for (const rec of imported) {
+    rec.index = app.records.length;
+    app.records.push(rec);
+  }
+  saveRecords();
+  broadcast({ t: "records", records: app.records });
+  log(t("logImpSgfOk", { n: imported.length }));
+  renderResults();
+  openReview(imported[imported.length - 1]);
+  setTab("analysis");
+}
+
+function resumeFromReview() {
+  if (app.role !== "host" || !app.review) return;
+  if (app.runner?.running) {
+    log(t("logResumeStopFirst"));
+    return;
+  }
+  const { rec, moveNo, variation } = app.review;
+  const prefix = rec.moves.slice(0, moveNo).concat(variation).map(([c, v]) => [c, v]);
+  // Sync board size & komi inputs to match the resumed game
+  if (["19", "13", "9"].includes(String(rec.size))) {
+    $("cfg-size").value = String(rec.size);
+  }
+  $("cfg-komi").value = String(rec.komi);
+  stopReviewPlay();
+  app.review = null;
+  $("review-bar").hidden = true;
+  log(t("logResumeStart", { moveNo: prefix.length }));
+  startMatch({
+    initialMoves: prefix,
+    size: rec.size,
+    komi: rec.komi,
+    koRule: rec.koRule || readConfig().koRule,
+    games: 1,
+    keepRecords: true,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Match control (host)
 // ---------------------------------------------------------------------------
-function startMatch() {
+function startMatch(override = null) {
   if (app.runner?.running) return;
   const a = myPlayer();
   const b = seatBPlayer();
   if (!a) return log(t("logNeedSeatA"));
   if (!b) return log(t("logNeedSeatB"));
-  if (app.records.length && !confirm(t("confirmNewMatch"))) return;
+  const keepRecords = !!override?.keepRecords;
+  if (!keepRecords && app.records.length && !confirm(t("confirmNewMatch"))) return;
+  stopFullAnalysis();
+  stopReviewPlay();
   const canRefScore = app.refBridge?.info && (app.refBridge.info.canScore ?? app.refBridge.info.commands?.includes("final_score"));
   const referee = canRefScore ? new EnginePlayer(app.refBridge, "referee") : null;
-  const runner = new MatchRunner(readConfig(), { A: a, B: b }, { referee });
+  const baseCfg = readConfig();
+  const cfg = override
+    ? {
+        ...baseCfg,
+        size: override.size ?? baseCfg.size,
+        komi: override.komi ?? baseCfg.komi,
+        koRule: override.koRule ?? baseCfg.koRule,
+        games: override.games ?? baseCfg.games,
+        initialMoves: override.initialMoves ?? null,
+      }
+    : baseCfg;
+
+  const scoreConfirm = (game) =>
+    new Promise((resolve) => {
+      app.deadScoring = { game, dead: new Set(), resolve };
+      update();
+    });
+
+  const runner = new MatchRunner(cfg, { A: a, B: b }, { referee, scoreConfirm });
   app.runner = runner;
-  app.records = [];
+  app.deadScoring = null;
+  if (!keepRecords) {
+    app.records = [];
+    app.liveAnalysis.clear();
+    app.analyzer.clearOwnership();
+  }
   app.review = null;
-  app.liveAnalysis.clear();
-  app.analyzer.clearOwnership();
+  $("review-bar").hidden = true;
   app.analyzer.cancel();
   saveRecords();
-  broadcast({ t: "records", records: [] });
+  if (!keepRecords) broadcast({ t: "records", records: [] });
   runner.addEventListener("state", update);
   runner.addEventListener("move", (e) => {
     const d = e.detail;
@@ -484,7 +694,8 @@ function startMatch() {
   runner.addEventListener("log", (e) => log(e.detail));
   runner.addEventListener("record", (e) => {
     const rec = e.detail;
-    const key = gameKeyOf(rec);
+    rec.index = app.records.length;
+    const key = gameKeyOf({ index: e.detail.index, size: rec.size, komi: rec.komi });
     const evalMap = getGameEvalMap(key, false);
     if (evalMap && evalMap.size) {
       rec.analysis = [...evalMap.values()]
@@ -497,7 +708,11 @@ function startMatch() {
     app.sound.playGameEnd();
     renderResults();
   });
-  runner.addEventListener("done", () => log(t("logMatchDone")));
+  runner.addEventListener("done", () => {
+    app.deadScoring = null;
+    log(t("logMatchDone"));
+    update();
+  });
   log(t("logMatchStart", { a: a.label, b: b.label, games: runner.config.games }));
   setTab("results");
   runner.run().catch((e) => {
@@ -839,7 +1054,7 @@ function replayFor(cur) {
   try {
     for (let i = game.moves.length; i < cur.moves.length; i++) {
       const [c, v, ms] = cur.moves[i];
-      game.apply(colorFromLetter(c), v, ms);
+      game.apply(colorFromLetter(c), v, ms ?? 0, { allowSameColor: true });
     }
   } catch (e) {
     console.warn("replay failed", e);
@@ -847,8 +1062,27 @@ function replayFor(cur) {
   return game;
 }
 
-function computeMoveNumbers(board, moves) {
-  if (app.numberMode === "last" || !moves?.length) return null;
+function computeMoveNumbers(board, moves, variationMoves = null) {
+  if (Array.isArray(variationMoves) && variationMoves.length) {
+    // In variation mode, always label the variation moves 1..K so the branch stands out
+    const map = new Map();
+    const varPts = new Set();
+    for (let i = 0; i < variationMoves.length; i++) {
+      const mv = String(variationMoves[i][1] ?? "").trim();
+      if (!mv || mv.toLowerCase() === "pass") continue;
+      try {
+        const p = board.fromGtp(mv);
+        if (p >= 0 && board.stones[p] !== 0) {
+          map.set(p, i + 1);
+          varPts.add(p);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return { map, varPts };
+  }
+  if (app.numberMode === "last" || !moves?.length) return { map: null, varPts: null };
   const start = app.numberMode === "last5" ? Math.max(0, moves.length - 5) : 0;
   const map = new Map();
   for (let i = start; i < moves.length; i++) {
@@ -861,37 +1095,36 @@ function computeMoveNumbers(board, moves) {
       // ignore invalid coordinate
     }
   }
-  return map;
+  return { map, varPts: null };
 }
 
 function renderBoard(v) {
   const evalCtx = getAnalysisSeriesForCurrent(v);
-  const curEval = evalCtx.map.get(evalCtx.moveNo) ?? null;
+  const inVariation = !!(app.review && app.review.variation.length);
+  const curEval = inVariation ? app.review.varEval : (evalCtx.map.get(evalCtx.moveNo) ?? null);
   const allowCands = app.showCandidates && canShowCandidates(v);
   const candidates = allowCands && curEval?.moves?.length ? curEval.moves : null;
 
   if (app.review) {
-    const { rec, moveNo } = app.review;
-    const g = new GameState(rec.size, rec.komi, rec.koRule);
-    const slice = rec.moves.slice(0, moveNo);
-    try {
-      for (const [c, mv, ms] of slice) g.apply(colorFromLetter(c), mv, ms);
-    } catch (e) {
-      console.warn(e);
-    }
-    const aiOwn = app.showTerritory ? app.analyzer.getOwnership(evalCtx.key, moveNo) : null;
+    const { rec, moveNo, variation } = app.review;
+    const { g, mainSlice } = buildReviewGame(app.review);
+    const varKey = inVariation ? `var:${gameKeyOf(rec)}:${moveNo}:${variation.length}` : evalCtx.key;
+    const ownMoveNo = inVariation ? mainSlice.length + variation.length : moveNo;
+    const aiOwn = app.showTerritory ? app.analyzer.getOwnership(varKey, ownMoveNo) : null;
     const ttOwner = app.showTerritory && !aiOwn
       ? g.trompTaylor().owner
-      : moveNo === rec.moves.length && /Tromp-Taylor/.test(rec.reason)
+      : !inVariation && moveNo === rec.moves.length && /Tromp-Taylor/.test(rec.reason)
         ? g.trompTaylor().owner
         : null;
+    const { map, varPts } = computeMoveNumbers(g.board, mainSlice, variation);
     boardView.render({
       size: rec.size,
       stones: g.board.stones,
       lastPoint: g.lastPoint,
       owner: ttOwner,
       ownership: aiOwn,
-      moveNumbers: computeMoveNumbers(g.board, slice),
+      moveNumbers: map,
+      variationPoints: varPts,
       candidates,
       toPlay: g.toPlay,
     });
@@ -900,19 +1133,31 @@ function renderBoard(v) {
   const cur = v?.current;
   if (cur) {
     const g = replayFor(cur);
+    if (app.deadScoring && app.deadScoring.game === app.runner?.current?.game) {
+      const tt = g.trompTaylor(app.deadScoring.dead);
+      boardView.render({
+        size: cur.size,
+        stones: g.board.stones,
+        lastPoint: g.lastPoint,
+        owner: tt.owner,
+        deadPoints: app.deadScoring.dead,
+      });
+      return;
+    }
     const aiOwn = app.showTerritory ? app.analyzer.getOwnership(evalCtx.key, cur.moves.length) : null;
     const ttOwner = app.showTerritory && !aiOwn
       ? g.trompTaylor().owner
       : cur.owner
         ? Uint8Array.from(cur.owner)
         : null;
+    const { map } = computeMoveNumbers(g.board, cur.moves);
     boardView.render({
       size: cur.size,
       stones: g.board.stones,
       lastPoint: g.lastPoint,
       owner: ttOwner,
       ownership: aiOwn,
-      moveNumbers: computeMoveNumbers(g.board, cur.moves),
+      moveNumbers: map,
       candidates,
       toPlay: g.toPlay,
     });
@@ -934,8 +1179,9 @@ function formatLeadLocalized(scoreLead) {
 
 function renderAnalysis(v) {
   const evalCtx = getAnalysisSeriesForCurrent(v);
-  const latest = latestEvalAt(evalCtx.series, evalCtx.moveNo);
-  const exact = evalCtx.map.get(evalCtx.moveNo) ?? null;
+  const inVariation = !!(app.review && app.review.variation.length);
+  const latest = inVariation ? (app.review.varEval || latestEvalAt(evalCtx.series, evalCtx.moveNo)) : latestEvalAt(evalCtx.series, evalCtx.moveNo);
+  const exact = inVariation ? app.review.varEval : (evalCtx.map.get(evalCtx.moveNo) ?? null);
 
   // Top winrate bar
   const barWrap = $("eval-bar-wrap");
@@ -955,7 +1201,13 @@ function renderAnalysis(v) {
 
   // Analysis tab KPIs
   $("eval-busy-dot").hidden = !app.analysisBusy;
-  $("btn-analyze-now").disabled = !app.analyzer.capable || (!app.review && !v?.current);
+  $("btn-analyze-now").disabled = !app.analyzer.capable || !!app.fullEval || (!app.review && !v?.current);
+  const fullBtn = $("btn-analyze-full");
+  if (fullBtn) {
+    const hasTarget = !!(app.review?.rec?.moves?.length || v?.current?.moves?.length);
+    fullBtn.disabled = !app.fullEval && (!app.analyzer.capable || !hasTarget);
+  }
+  renderFullEvalBar();
   $("an-winrate").textContent = latest ? `${(latest.winrate * 100).toFixed(1)}%` : "--";
   $("an-lead").textContent = latest && typeof latest.scoreLead === "number" ? formatLeadLocalized(latest.scoreLead) : "--";
   $("an-visits").textContent = latest && latest.visits ? String(latest.visits) : "--";
@@ -965,13 +1217,7 @@ function renderAnalysis(v) {
   if (ttNode) {
     let g = null;
     if (app.review) {
-      const { rec, moveNo } = app.review;
-      g = new GameState(rec.size, rec.komi, rec.koRule);
-      try {
-        for (const [c, mv, ms] of rec.moves.slice(0, moveNo)) g.apply(colorFromLetter(c), mv, ms);
-      } catch {
-        g = null;
-      }
+      g = buildReviewGame(app.review).g;
     } else if (v?.current) {
       g = replayFor(v.current);
     }
@@ -1117,6 +1363,10 @@ function renderStatus(v) {
   if (dot) {
     dot.className = "status-dot" + (v?.paused ? " paused" : v?.running ? " live" : "");
   }
+  if (app.deadScoring && !app.review) {
+    line.textContent = t("statusMarkDead");
+    return;
+  }
   if (app.review) {
     line.textContent = t("statusReviewing", { game: app.review.rec.index + 1, result: app.review.rec.result });
     return;
@@ -1183,8 +1433,56 @@ function renderControls(v) {
   }
 
   const human = activeHuman();
-  $("human-controls").hidden = !human || !!app.review;
-  boardView.setInteractive(human && !app.review ? colorFromLetter(human.pendingCtx.color) : null);
+  const inDead = !!(app.deadScoring && !app.review);
+  $("human-controls").hidden = !human || !!app.review || inDead;
+  const undoBtn = $("btn-undo");
+  if (undoBtn) {
+    const canUndo = !!(
+      host &&
+      human &&
+      app.runner?.running &&
+      $("b-kind").value !== "remote" &&
+      (app.runner.current?.game?.moves.length ?? 0) > (app.runner.current?.initialCount ?? 0)
+    );
+    undoBtn.hidden = !canUndo;
+  }
+  const deadBox = $("dead-controls");
+  if (deadBox) {
+    deadBox.hidden = !inDead;
+    if (inDead) {
+      const tt = app.deadScoring.game.trompTaylor(app.deadScoring.dead);
+      $("dead-preview").textContent = t("deadPreviewText", {
+        score: formatScore(tt.diff),
+        dead: app.deadScoring.dead.size,
+      });
+    }
+  }
+
+  if (inDead) {
+    boardView.setInteractive("dead");
+  } else if (app.review && app.review.tryMode) {
+    const { g } = buildReviewGame(app.review);
+    boardView.setInteractive(g.toPlay);
+  } else {
+    boardView.setInteractive(human && !app.review ? colorFromLetter(human.pendingCtx.color) : null);
+  }
+
+  if (app.review) {
+    const r = app.review;
+    $("review-try").classList.toggle("active", !!r.tryMode);
+    $("review-try-undo").hidden = r.variation.length === 0;
+    $("review-try-reset").hidden = r.variation.length === 0;
+    const vb = $("review-var-badge");
+    vb.hidden = r.variation.length === 0;
+    if (r.variation.length) vb.textContent = t("varBadge", { n: r.variation.length });
+    const playBtn = $("review-play");
+    if (playBtn) {
+      playBtn.textContent = r.playTimer ? "⏸" : "▶︎";
+      playBtn.classList.toggle("active", !!r.playTimer);
+    }
+    const resumeBtn = $("review-resume");
+    if (resumeBtn) resumeBtn.disabled = !host || running;
+  }
 
   const meReady = $("my-kind").value === "human" || !!app.myBridge?.info;
   const meErr = app.bridgeHintState.my?.kind === "err";
@@ -1368,8 +1666,46 @@ function renderResults() {
   box.append(sb, grid, sr);
 }
 
+function stopReviewPlay() {
+  if (app.review?.playTimer) {
+    clearInterval(app.review.playTimer);
+    app.review.playTimer = null;
+  }
+}
+
+function toggleReviewPlay() {
+  if (!app.review) return;
+  if (app.review.playTimer) {
+    stopReviewPlay();
+    update();
+    return;
+  }
+  if (app.review.moveNo >= app.review.rec.moves.length) {
+    app.review.moveNo = 0;
+  }
+  app.review.variation = [];
+  app.review.varEval = null;
+  const ms = Number($("review-speed")?.value) || 650;
+  app.review.playTimer = setInterval(() => {
+    if (!app.review) return stopReviewPlay();
+    if (app.review.moveNo >= app.review.rec.moves.length) {
+      stopReviewPlay();
+      update();
+      return;
+    }
+    app.review.moveNo++;
+    $("review-slider").value = String(app.review.moveNo);
+    const mv = app.review.rec.moves[app.review.moveNo - 1]?.[1] ?? "";
+    if (String(mv).toLowerCase() === "pass") app.sound.playPass();
+    else app.sound.playStone(0);
+    update();
+  }, ms);
+  update();
+}
+
 function openReview(rec) {
-  app.review = { rec, moveNo: rec.moves.length };
+  stopReviewPlay();
+  app.review = { rec, moveNo: rec.moves.length, tryMode: false, variation: [], varEval: null, playTimer: null };
   $("review-bar").hidden = false;
   $("review-title").textContent = t("reviewTitle", { game: rec.index + 1, result: rec.result });
   const slider = $("review-slider");
@@ -1381,18 +1717,26 @@ function openReview(rec) {
 
 function stepReview(moveNo) {
   if (!app.review) return;
+  stopReviewPlay();
   const max = app.review.rec.moves.length;
   app.review.moveNo = Math.max(0, Math.min(max, moveNo));
+  app.review.variation = [];
+  app.review.varEval = null;
   $("review-slider").value = String(app.review.moveNo);
   update();
 }
 
 function updateReviewLabel() {
   if (!app.review) return;
-  const { rec, moveNo } = app.review;
+  const { rec, moveNo, variation } = app.review;
   $("review-title").textContent = t("reviewTitle", { game: rec.index + 1, result: rec.result });
+  if (variation.length) {
+    const last = variation[variation.length - 1];
+    $("review-move").textContent = `+${variation.length}. ${last[0]} ${last[1]}`;
+    return;
+  }
   const mv = moveNo > 0 ? rec.moves[moveNo - 1] : null;
-  $("review-move").textContent = mv ? t("reviewMove", { no: moveNo, c: mv[0], v: mv[1], s: (mv[2] / 1000).toFixed(1) }) : t("reviewStart");
+  $("review-move").textContent = mv ? t("reviewMove", { no: moveNo, c: mv[0], v: mv[1], s: ((mv[2] || 0) / 1000).toFixed(1) }) : t("reviewStart");
 }
 
 function update() {
@@ -1473,13 +1817,51 @@ function setLanguage(lang) {
 }
 
 function onBoardClick(point) {
+  // 1) Dead-stone marking after double-pass in human games
+  if (app.deadScoring && !app.review) {
+    const { game, dead } = app.deadScoring;
+    if (game.board.stones[point] === 0) return;
+    const { chain } = game.board.group(point);
+    const markDead = !dead.has(point);
+    for (const p of chain) {
+      if (markDead) dead.add(p);
+      else dead.delete(p);
+    }
+    update();
+    return;
+  }
+
+  // 2) Variation exploration during review
+  if (app.review) {
+    if (!app.review.tryMode) return;
+    stopReviewPlay();
+    const { g } = buildReviewGame(app.review);
+    const color = g.toPlay;
+    if (!g.board.isLegal(color, point)) {
+      $("status-line").textContent = t("illegalMove", { v: g.board.toGtp(point) });
+      return;
+    }
+    const prevCap = g.board.captures[color];
+    const vertex = g.board.toGtp(point);
+    g.apply(color, vertex, 0);
+    const captured = g.board.captures[color] - prevCap;
+    app.review.variation.push([colorLetter(color), vertex, 0]);
+    app.review.varEval = null;
+    app.sound.playStone(captured);
+    update();
+    if (app.analyzer.capable) triggerVariationAnalysis();
+    return;
+  }
+
+  // 3) Live human move
   const human = activeHuman();
-  if (!human || app.review) return;
+  if (!human) return;
   const ctx = human.pendingCtx;
   const color = colorFromLetter(ctx.color);
   let g;
   try {
-    g = GameState.fromMoves(ctx.size, ctx.komi, ctx.koRule, ctx.moves);
+    g = new GameState(ctx.size, ctx.komi, ctx.koRule);
+    for (const [c, v] of ctx.moves) g.apply(colorFromLetter(c), v, 0, { allowSameColor: true });
   } catch (e) {
     return log(t("logRebuildFail", { msg: e.message }));
   }
@@ -1513,6 +1895,23 @@ function init() {
   });
   app.analyzer.addEventListener("result", (e) => {
     const entry = e.detail;
+    // Variation analysis results stay isolated from main-line records
+    if (String(entry.gameKey || "").startsWith("var:")) {
+      if (app.review) {
+        const expected = `var:${gameKeyOf(app.review.rec)}:${app.review.moveNo}:${app.review.variation.length}`;
+        if (entry.gameKey === expected) {
+          app.review.varEval = {
+            moveNo: entry.moveNo,
+            winrate: entry.winrate,
+            scoreLead: entry.scoreLead,
+            visits: entry.visits,
+            moves: entry.moves,
+          };
+          update();
+        }
+      }
+      return;
+    }
     const map = getGameEvalMap(entry.gameKey, true);
     if (map) {
       map.set(entry.moveNo, {
@@ -1589,6 +1988,7 @@ function init() {
     update();
   };
   $("btn-analyze-now").onclick = triggerManualAnalysis;
+  $("btn-analyze-full").onclick = toggleFullGameAnalysis;
   for (const btn of document.querySelectorAll(".seg-btn[data-chart-mode]")) {
     btn.onclick = () => {
       for (const b of document.querySelectorAll(".seg-btn[data-chart-mode]")) {
@@ -1635,7 +2035,7 @@ function init() {
     }
   };
 
-  $("m-start").onclick = startMatch;
+  $("m-start").onclick = () => startMatch();
   $("m-pause").onclick = () => app.runner?.pause();
   $("m-resume").onclick = () => {
     if (!app.runner) return;
@@ -1643,20 +2043,79 @@ function init() {
     if ($("b-kind").value === "remote" && !app.remote) return log(t("logWaitGuestRejoin"));
     app.runner.resume();
   };
-  $("m-stop").onclick = () => app.runner?.stop();
+  $("m-stop").onclick = () => {
+    if (app.deadScoring) {
+      app.deadScoring = null;
+    }
+    app.runner?.stop();
+  };
 
+  $("btn-undo").onclick = () => {
+    if (!app.runner?.running) return;
+    const bothHuman = $("my-kind").value === "human" && $("b-kind").value === "human";
+    app.runner.requestUndo(bothHuman ? 1 : 2);
+  };
   $("btn-pass").onclick = () => activeHuman()?.submit("pass");
   $("btn-resign").onclick = () => {
     if (confirm(t("confirmResign"))) activeHuman()?.submit("resign");
+  };
+  $("btn-dead-confirm").onclick = () => {
+    if (!app.deadScoring) return;
+    const { dead, resolve } = app.deadScoring;
+    app.deadScoring = null;
+    resolve(new Set(dead));
+    update();
+  };
+  $("btn-dead-resume").onclick = () => {
+    if (!app.deadScoring) return;
+    const { resolve } = app.deadScoring;
+    app.deadScoring = null;
+    resolve(null);
+    update();
   };
   for (const h of [app.myHuman, app.bHuman]) h.addEventListener("turn", update);
 
   $("review-slider").oninput = (e) => stepReview(Number(e.target.value));
   $("review-first").onclick = () => stepReview(0);
+  $("review-prev10").onclick = () => app.review && stepReview(app.review.moveNo - 10);
   $("review-prev").onclick = () => app.review && stepReview(app.review.moveNo - 1);
+  $("review-play").onclick = toggleReviewPlay;
   $("review-next").onclick = () => app.review && stepReview(app.review.moveNo + 1);
+  $("review-next10").onclick = () => app.review && stepReview(app.review.moveNo + 10);
   $("review-last").onclick = () => app.review && stepReview(app.review.rec.moves.length);
+  $("review-speed").onchange = () => {
+    if (app.review?.playTimer) {
+      stopReviewPlay();
+      toggleReviewPlay();
+    }
+  };
+  $("review-try").onclick = () => {
+    if (!app.review) return;
+    stopReviewPlay();
+    app.review.tryMode = !app.review.tryMode;
+    if (!app.review.tryMode) {
+      app.review.variation = [];
+      app.review.varEval = null;
+    }
+    update();
+  };
+  $("review-try-undo").onclick = () => {
+    if (!app.review || !app.review.variation.length) return;
+    app.review.variation.pop();
+    app.review.varEval = null;
+    update();
+    if (app.review.variation.length && app.analyzer.capable) triggerVariationAnalysis();
+  };
+  $("review-try-reset").onclick = () => {
+    if (!app.review) return;
+    app.review.variation = [];
+    app.review.varEval = null;
+    update();
+  };
+  $("review-resume").onclick = resumeFromReview;
   $("review-close").onclick = () => {
+    stopReviewPlay();
+    stopFullAnalysis();
     app.review = null;
     $("review-bar").hidden = true;
     renderResults();
@@ -1665,13 +2124,45 @@ function init() {
   document.addEventListener("keydown", (e) => {
     if (!app.review) return;
     if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
-    if (e.key === "ArrowLeft") { e.preventDefault(); stepReview(app.review.moveNo - 1); }
-    else if (e.key === "ArrowRight") { e.preventDefault(); stepReview(app.review.moveNo + 1); }
+    if (e.key === "ArrowLeft") { e.preventDefault(); stepReview(app.review.moveNo - (e.shiftKey ? 10 : 1)); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); stepReview(app.review.moveNo + (e.shiftKey ? 10 : 1)); }
+    else if (e.key === " ") { e.preventDefault(); toggleReviewPlay(); }
     else if (e.key === "Home") { e.preventDefault(); stepReview(0); }
     else if (e.key === "End") { e.preventDefault(); stepReview(app.review.rec.moves.length); }
     else if (e.key === "Escape") $("review-close").click();
   });
   $("review-sgf").onclick = () => app.review && download(`go-arena-game${app.review.rec.index + 1}.sgf`, recordToSgf(app.review.rec), "application/x-go-sgf");
+
+  $("imp-sgf").onclick = () => $("imp-sgf-file").click();
+  $("imp-sgf-file").onchange = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      importSgfText(text);
+    } catch (err) {
+      log(t("logImpSgfFail", { msg: err.message }));
+    }
+  };
+  $("imp-sgf-paste").onclick = () => {
+    const text = prompt(t("promptPasteSgf"));
+    if (text && text.trim()) importSgfText(text);
+  };
+  // Allow dragging and dropping .sgf files directly onto the window
+  window.addEventListener("dragover", (e) => {
+    if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
+  });
+  window.addEventListener("drop", async (e) => {
+    const file = e.dataTransfer?.files?.[0];
+    if (!file || !/\.(sgf|txt)$/i.test(file.name)) return;
+    e.preventDefault();
+    try {
+      importSgfText(await file.text());
+    } catch (err) {
+      log(t("logImpSgfFail", { msg: err.message }));
+    }
+  });
 
   $("exp-sgf").onclick = () => {
     if (!app.records.some((r) => !r.void)) return log(t("logNoGamesExport"));

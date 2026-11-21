@@ -101,7 +101,7 @@ export class BoardView {
 
   updateGhost(point) {
     const stones = this.position?.stones;
-    if (point === null || !this.interactiveColor || !stones || stones[point] !== EMPTY) {
+    if (point === null || (this.interactiveColor !== BLACK && this.interactiveColor !== WHITE) || !stones || stones[point] !== EMPTY) {
       this.ghost.setAttribute("visibility", "hidden");
       return;
     }
@@ -114,9 +114,10 @@ export class BoardView {
   }
 
   setInteractive(color) {
+    // color: BLACK | WHITE | "dead" | null
     this.interactiveColor = color;
     this.svg.classList.toggle("interactive", !!color);
-    if (!color) this.updateGhost(null);
+    if (!color || color === "dead") this.updateGhost(null);
   }
 
   drawGrid(size) {
@@ -229,14 +230,16 @@ export class BoardView {
   //   size, stones: Uint8Array, lastPoint,
   //   owner?: Uint8Array,                // discrete Tromp-Taylor ownership (1=B, 2=W)
   //   ownership?: number[],              // continuous AI ownership in [-1, 1] (+1=B, -1=W)
+  //   deadPoints?: Set<number>,          // stones marked dead during human scoring
   //   moveNumbers?: Map<number, number>,
+  //   variationPoints?: Set<number>,     // stones placed in a review variation branch
   //   candidates?: [{move, winrate, scoreLead, visits, pv}],
   //   toPlay?: BLACK | WHITE,
   // }
   render(position) {
     this.position = position;
     if (position.size !== this.size) this.drawGrid(position.size);
-    const { size, stones, lastPoint, owner, ownership, moveNumbers, candidates, toPlay } = position;
+    const { size, stones, lastPoint, owner, ownership, deadPoints, moveNumbers, variationPoints, candidates, toPlay } = position;
 
     this.ownerLayer.replaceChildren();
     if (Array.isArray(ownership) && ownership.length === size * size) {
@@ -261,7 +264,8 @@ export class BoardView {
       }
     } else if (owner) {
       for (let p = 0; p < owner.length; p++) {
-        if (!owner[p] || stones[p] === owner[p]) continue;
+        const isDead = deadPoints?.has(p);
+        if (!owner[p] || (!isDead && stones[p] === owner[p])) continue;
         const x = p % size;
         const y = (p - x) / size;
         el("rect", {
@@ -280,18 +284,31 @@ export class BoardView {
       const y = (p - x) / size;
       const cx = MARGIN + x;
       const cy = MARGIN + y;
+      const isDead = deadPoints?.has(p);
       el("circle", {
         cx: cx + 0.055, cy: cy + 0.075, r: 0.468,
-        class: "stone-shadow",
+        class: isDead ? "stone-shadow dead" : "stone-shadow",
       }, this.shadowLayer);
       el("circle", {
         cx, cy, r: 0.476,
         fill: s === BLACK ? "url(#stone-b)" : "url(#stone-w)",
-        class: s === WHITE ? "stone white" : "stone black",
+        class: [s === WHITE ? "stone white" : "stone black", isDead ? "dead" : ""].filter(Boolean).join(" "),
       }, this.stoneLayer);
     }
 
     this.markLayer.replaceChildren();
+    if (deadPoints && deadPoints.size) {
+      for (const p of deadPoints) {
+        if (stones[p] === EMPTY) continue;
+        const x = p % size;
+        const y = (p - x) / size;
+        const cx = MARGIN + x;
+        const cy = MARGIN + y;
+        const d = 0.22;
+        el("line", { x1: cx - d, y1: cy - d, x2: cx + d, y2: cy + d, class: "dead-x" }, this.markLayer);
+        el("line", { x1: cx + d, y1: cy - d, x2: cx - d, y2: cy + d, class: "dead-x" }, this.markLayer);
+      }
+    }
     if (moveNumbers && moveNumbers.size) {
       for (const [p, num] of moveNumbers) {
         if (stones[p] === EMPTY) continue;
@@ -300,10 +317,12 @@ export class BoardView {
         const digits = String(num).length;
         const fz = digits >= 3 ? 0.31 : digits === 2 ? 0.37 : 0.42;
         const isLast = p === lastPoint;
+        const isVar = variationPoints?.has(p);
         const cls = [
           "move-num",
           stones[p] === BLACK ? "on-black" : "on-white",
           isLast ? "is-last" : "",
+          isVar ? "is-var" : "",
         ].filter(Boolean).join(" ");
         el("text", {
           x: MARGIN + x,

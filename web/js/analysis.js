@@ -154,6 +154,50 @@ export class AnalysisManager extends EventTarget {
     }
   }
 
+  // Analyze one exact position and resolve with the result (used by full-game batch review).
+  async analyzeOnce(job) {
+    if (!this.capable) throw new Error("analyzer engine not connected");
+    const opts = { ...DEFAULT_ANALYSIS_OPTIONS, ...job };
+    this.activeKey = `${opts.gameKey}:${opts.moveNo}`;
+    this.dispatchEvent(new CustomEvent("busy", { detail: { busy: true, job: opts } }));
+    try {
+      const res = await this.bridge.request(
+        "analyze",
+        {
+          size: opts.size,
+          komi: opts.komi,
+          color: opts.color,
+          moves: opts.moves.map(([c, v]) => [c, v]),
+          maxTimeMs: opts.maxTimeMs,
+          maxVisits: opts.maxVisits,
+          maxMoves: opts.maxMoves,
+          includeOwnership: opts.includeOwnership,
+        },
+        Math.max(10000, (opts.maxTimeMs || 500) + 10000),
+      );
+      if (typeof res.winrate !== "number") return null;
+      if (Array.isArray(res.ownership)) {
+        this._putOwnership(opts.gameKey, opts.moveNo, res.ownership);
+      }
+      const entry = {
+        gameKey: opts.gameKey,
+        moveNo: opts.moveNo,
+        winrate: res.winrate,
+        scoreLead: typeof res.scoreLead === "number" ? res.scoreLead : null,
+        visits: res.visits ?? 0,
+        moves: Array.isArray(res.moves) ? res.moves : [],
+        ownership: Array.isArray(res.ownership) ? res.ownership : null,
+        proto: res.proto ?? this.proto,
+        stale: false,
+      };
+      this.dispatchEvent(new CustomEvent("result", { detail: entry }));
+      return entry;
+    } finally {
+      this.activeKey = null;
+      this.dispatchEvent(new CustomEvent("busy", { detail: { busy: false } }));
+    }
+  }
+
   // Schedule analysis for a position. Newer calls preempt/coalesce older ones.
   // job: { gameKey, moveNo, size, komi, color, moves, maxTimeMs, maxVisits, maxMoves, includeOwnership }
   request(job) {

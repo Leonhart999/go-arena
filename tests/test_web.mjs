@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { BLACK, WHITE, PASS, Board, GameState, IllegalMove, formatScore } from "../web/js/go.js";
 import { wilson, eloFromScore, los, summarize } from "../web/js/stats.js";
-import { recordToSgf, recordsToCsv } from "../web/js/sgf.js";
+import { recordToSgf, recordsToCsv, parseSgf, parseSgfCollection } from "../web/js/sgf.js";
 import { readFileSync } from "node:fs";
 import { MatchRunner, parseScore } from "../web/js/match.js";
 import { DICT, detectLang, translate } from "../web/js/i18n.js";
@@ -285,4 +285,112 @@ test("analysis blunder detection, formatting, record stripping, and SGF eval com
   sfx.setEnabled(false);
   assert.equal(sfx.enabled, false);
   assert.equal(mem.get("go-arena.sound"), "0");
+});
+
+test("SGF import parses single/collection games, setup stones, variations, and eval comments", () => {
+  const sample = `
+    (;GM[1]FF[4]SZ[9]KM[6.5]PB[Alice]PW[Bob]RE[B+3.5]DT[2026-11-22]
+     AB[cc][gg]
+     ;W[ee]C[1.5s | B 54.2% | B+0.8]
+     (;B[ce]C[0.9s | B 61.0% | B+2.1];W[])
+     (;B[ge];W[cg]))
+    (;GM[1]FF[4]SZ[5]KM[2.5]PB[Bot1]PW[Bot2]RE[W+R];B[cc];W[bb])
+  `;
+  const recs = parseSgfCollection(sample, 0);
+  assert.equal(recs.length, 2);
+
+  const g1 = recs[0];
+  assert.equal(g1.size, 9);
+  assert.equal(g1.komi, 6.5);
+  assert.equal(g1.labels.A, "Alice");
+  assert.equal(g1.labels.B, "Bob");
+  assert.equal(g1.result, "B+3.5");
+  assert.equal(g1.winnerSeat, "A");
+  // AB[cc][gg] + W[ee] + main branch B[ce] + W[] (pass); side branch ignored
+  assert.deepEqual(g1.moves.map(([c, v]) => `${c}:${v}`), ["B:C7", "B:G3", "W:E5", "B:C5", "W:pass"]);
+  assert.equal(g1.analysis.length, 2);
+  assert.equal(g1.analysis[0].moveNo, 3);
+  assert.ok(Math.abs(g1.analysis[0].winrate - 0.542) < 1e-4);
+  assert.equal(g1.analysis[1].scoreLead, 2.1);
+
+  // Round-trip exported SGF through parseSgf
+  const exported = recordToSgf(recs[1]);
+  const reparsed = parseSgf(exported);
+  assert.equal(reparsed.size, 5);
+  assert.equal(reparsed.moves.length, 2);
+  assert.deepEqual(reparsed.moves.map(([c, v]) => [c, v]), [["B", "C3"], ["W", "B4"]]);
+});
+
+test("areaScore with dead stones, MatchRunner resume from prefix, undo, and dead-stone confirm", async () => {
+  // Dead-stone scoring: Black surrounds board except one White dead stone at C2
+  const b = new Board(3, "positional");
+  for (const v of ["B3", "B2", "B1"]) b.play(BLACK, b.fromGtp(v));
+  b.play(WHITE, b.fromGtp("C2"));
+  const aliveScore = b.areaScore();
+  assert.equal(aliveScore.black, 6);
+  assert.equal(aliveScore.white, 1);
+  // Marking C2 as dead gives Black the entire 3x3 board (9 points)
+  const deadScore = b.areaScore(new Set([b.fromGtp("C2")]));
+  assert.equal(deadScore.black, 9);
+  assert.equal(deadScore.white, 0);
+
+  // MatchRunner: resume from prefix + undo + human dead-stone confirmation
+  let aStep = 0;
+  let runnerRef = null;
+  const humanA = {
+    kind: "human",
+    label: "HumanA",
+    requestMove(ctx) {
+      aStep++;
+      // On second turn (after B played C2), undo 2 moves once, then pass to enter dead-stone scoring
+      if (aStep === 2) {
+        return new Promise((resolve) => {
+          setTimeout(() => runnerRef.requestUndo(2), 5);
+          // Will be interrupted by UndoSignal
+          void resolve;
+        });
+      }
+      if (aStep === 1) return Promise.resolve("B1");
+      return Promise.resolve("pass");
+    },
+    cancel() {},
+  };
+  const botB = {
+    kind: "engine",
+    label: "BotB",
+    requestMove(ctx) {
+      // If A passed, pass back; otherwise play C2
+      const last = ctx.moves[ctx.moves.length - 1]?.[1];
+      if (last === "pass") return Promise.resolve("pass");
+      return Promise.resolve("C2");
+    },
+    cancel() {},
+  };
+
+  let confirmCalled = false;
+  const runner = new MatchRunner(
+    {
+      size: 3,
+      komi: 0.5,
+      koRule: "positional",
+      games: 1,
+      timePerMove: 0,
+      initialMoves: [["B", "B3"], ["W", "C3"], ["B", "B2"], ["W", "pass"]],
+    },
+    { A: humanA, B: botB },
+    {
+      scoreConfirm: async (game) => {
+        confirmCalled = true;
+        // Mark White's C3 as dead
+        return new Set([game.board.fromGtp("C3")]);
+      },
+    },
+  );
+  runnerRef = runner;
+  await runner.run();
+  assert.equal(confirmCalled, true);
+  assert.equal(runner.records.length, 1);
+  // All 9 points belong to Black minus 0.5 komi = B+8.5
+  assert.equal(runner.records[0].result, "B+8.5");
+  assert.equal(runner.records[0].winnerSeat, "A");
 });

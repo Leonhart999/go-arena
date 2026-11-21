@@ -1,6 +1,6 @@
 // Host-side match referee: asks seated players for moves, enforces the
 // rules and the move clock, scores finished games and keeps the records.
-import { BLACK, GameState, IllegalMove, colorLetter, formatScore } from "./go.js";
+import { BLACK, GameState, IllegalMove, colorFromLetter, colorLetter, formatScore } from "./go.js";
 import { Cancelled, Disconnected } from "./players.js";
 
 // Extra time allowed on top of the per-move limit for process and network lag.
@@ -15,6 +15,8 @@ export const DEFAULT_CONFIG = {
   timePerMove: 10, // seconds, 0 = unlimited
   maxMoves: 0, // 0 = 2 * size * size
   moveDelay: 0, // ms pause after each move, for watching
+  initialMoves: null, // optional [[color, vertex], ...] prefix for game 1 (resume from review)
+  startBlackSeat: null, // optional "A" | "B" for game 1
 };
 
 class Timeout extends Error {}
@@ -23,6 +25,14 @@ class StopGame extends Error {
   constructor(reason) {
     super(reason);
     this.name = "StopGame";
+  }
+}
+
+class UndoSignal extends Error {
+  constructor(steps) {
+    super("undo");
+    this.name = "UndoSignal";
+    this.steps = steps;
   }
 }
 
@@ -50,11 +60,12 @@ export function parseScore(text) {
 }
 
 export class MatchRunner extends EventTarget {
-  constructor(config, seats, { referee = null } = {}) {
+  constructor(config, seats, { referee = null, scoreConfirm = null } = {}) {
     super();
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.seats = { ...seats }; // { A: player, B: player }
     this.referee = referee; // EnginePlayer used only for final_score, or null
+    this.scoreConfirm = scoreConfirm; // optional async (game) => Set<point> | null (null = resume playing)
     this.records = [];
     this.current = null;
     this.running = false;
@@ -108,6 +119,17 @@ export class MatchRunner extends EventTarget {
     this._interrupt?.(new StopGame(reason));
   }
 
+  // Undo the last `steps` plies in the current game (used during local human games).
+  requestUndo(steps = 1) {
+    if (!this.current || this.current.result || !this._interrupt) return false;
+    const minLen = this.current.initialCount || 0;
+    const avail = this.current.game.moves.length - minLen;
+    if (avail <= 0) return false;
+    const count = Math.min(avail, Math.max(1, steps));
+    this._interrupt(new UndoSignal(count));
+    return true;
+  }
+
   _interruptible(promise) {
     return new Promise((resolve, reject) => {
       this._interrupt = reject;
@@ -137,8 +159,12 @@ export class MatchRunner extends EventTarget {
           this.voidReason = null;
         }
         if (this.stopped) break;
-        const blackSeat = this.config.alternate && played % 2 === 1 ? "B" : "A";
-        const rec = await this.playGame(this.records.length, blackSeat);
+        const firstBlack = this.config.startBlackSeat === "B" ? "B" : "A";
+        const blackSeat = this.config.alternate && played % 2 === 1 ? otherSeat(firstBlack) : firstBlack;
+        const prefix = played === 0 && Array.isArray(this.config.initialMoves) && this.config.initialMoves.length
+          ? this.config.initialMoves
+          : null;
+        const rec = await this.playGame(this.records.length, blackSeat, prefix);
         this.records.push(rec);
         this.emit("record", rec);
         if (!rec.void) played++;
@@ -158,20 +184,34 @@ export class MatchRunner extends EventTarget {
     }
   }
 
-  async playGame(index, blackSeat) {
+  async playGame(index, blackSeat, initialMoves = null) {
     const cfg = this.config;
     const whiteSeat = otherSeat(blackSeat);
     const colorOf = (seat) => (seat === blackSeat ? "B" : "W");
-    const g = new GameState(cfg.size, cfg.komi, cfg.koRule);
+    const buildGame = (moveList) => {
+      const state = new GameState(cfg.size, cfg.komi, cfg.koRule);
+      if (Array.isArray(moveList)) {
+        for (const [c, v, ms] of moveList) {
+          state.apply(colorFromLetter(c), v, ms ?? 0, { allowSameColor: true });
+        }
+      }
+      return state;
+    };
+    let g = buildGame(initialMoves);
+    const initialCount = g.moves.length;
     const labels = { A: this.seats.A.label, B: this.seats.B.label };
     const maxMoves = cfg.maxMoves > 0 ? cfg.maxMoves : 2 * cfg.size * cfg.size;
     const startedAt = new Date().toISOString();
     const t0 = performance.now();
     const thinkMs = { A: 0, B: 0 };
     const moveCount = { A: 0, B: 0 };
-    const cur = (this.current = { index, blackSeat, labels, game: g, result: null, reason: "", owner: null, thinking: null });
+    const cur = (this.current = { index, blackSeat, labels, game: g, initialCount, result: null, reason: "", owner: null, thinking: null });
     this.voidReason = null;
-    this.log(`Game ${index + 1}: ${labels[blackSeat]} (B) vs ${labels[whiteSeat]} (W)`);
+    this.log(
+      initialCount
+        ? `Game ${index + 1}: ${labels[blackSeat]} (B) vs ${labels[whiteSeat]} (W) (resumed from move ${initialCount})`
+        : `Game ${index + 1}: ${labels[blackSeat]} (B) vs ${labels[whiteSeat]} (W)`,
+    );
     this.emit("state");
 
     const win = (seat, how, reason) => ({ winnerSeat: seat, result: `${colorOf(seat)}+${how}`, reason });
@@ -211,6 +251,15 @@ export class MatchRunner extends EventTarget {
         } catch (e) {
           cur.thinking = null;
           player.cancel();
+          if (e instanceof UndoSignal) {
+            const trimmed = g.moves.slice(0, Math.max(initialCount, g.moves.length - e.steps));
+            g = buildGame(trimmed);
+            cur.game = g;
+            cur.owner = null;
+            this.log(`Undid ${e.steps} move(s) (now at move ${g.moves.length})`);
+            this.emit("state");
+            continue;
+          }
           if (e instanceof StopGame) throw e;
           if (e instanceof Disconnected || e instanceof Cancelled) throw new StopGame(e.message);
           if (e instanceof Timeout) end = lose(seat, "T", `${labels[seat]} exceeded ${cfg.timePerMove}s per move`);
@@ -239,9 +288,28 @@ export class MatchRunner extends EventTarget {
         }
         this.emit("move", { color: ctx.color, move: mv, moveNo: g.moves.length, captured });
 
-        if (g.consecutivePasses >= 2) end = await this.score(g, "both passed", fromDiff);
-        else if (g.moves.length >= maxMoves) end = await this.score(g, `move limit ${maxMoves}`, fromDiff);
-        else if (cfg.moveDelay > 0) await this._interruptible(sleep(cfg.moveDelay));
+        if (g.consecutivePasses >= 2) {
+          const hasHuman = this.seats.A.kind === "human" || this.seats.B.kind === "human";
+          if (!this.referee && hasHuman && typeof this.scoreConfirm === "function") {
+            const deadSet = await this._interruptible(this.scoreConfirm(g));
+            if (deadSet === null) {
+              // Players chose to resume playing instead of scoring
+              g.consecutivePasses = 0;
+              this.emit("state");
+              continue;
+            }
+            const tt = g.trompTaylor(deadSet);
+            this.current.owner = tt.owner;
+            const deadSuffix = deadSet && deadSet.size ? `, ${deadSet.size} dead marked` : "";
+            end = fromDiff(tt.diff, `both passed; area B ${tt.black} W ${tt.white} komi ${g.komi}${deadSuffix}`);
+          } else {
+            end = await this.score(g, "both passed", fromDiff);
+          }
+        } else if (g.moves.length >= maxMoves) {
+          end = await this.score(g, `move limit ${maxMoves}`, fromDiff);
+        } else if (cfg.moveDelay > 0) {
+          await this._interruptible(sleep(cfg.moveDelay));
+        }
       }
     } catch (e) {
       if (!(e instanceof StopGame)) throw e;
