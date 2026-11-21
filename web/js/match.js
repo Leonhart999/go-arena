@@ -227,14 +227,17 @@ export class MatchRunner extends EventTarget {
           end = lose(seat, "R", `${labels[seat]} resigned`);
           break;
         }
+        let captured = 0;
         try {
+          const prevCap = g.board.captures[color];
           g.apply(color, mv, ms);
+          captured = g.board.captures[color] - prevCap;
         } catch (e) {
           if (!(e instanceof IllegalMove)) throw e;
           end = lose(seat, "F", `illegal move "${mv}" by ${labels[seat]}: ${e.message}`);
           break;
         }
-        this.emit("move");
+        this.emit("move", { color: ctx.color, move: mv, moveNo: g.moves.length, captured });
 
         if (g.consecutivePasses >= 2) end = await this.score(g, "both passed", fromDiff);
         else if (g.moves.length >= maxMoves) end = await this.score(g, `move limit ${maxMoves}`, fromDiff);

@@ -128,6 +128,115 @@ class RandomGtpTests(unittest.TestCase):
 
 
 class BridgeTests(unittest.TestCase):
+    def test_parse_analyze_line_kata_and_lz(self):
+        # White to play: winrate 0.30 for White -> 0.70 for Black; scoreLead -2.5 -> +2.5 for Black; ownership flipped.
+        kata_line = (
+            "info move D4 visits 120 winrate 0.3000 scoreLead -2.50 order 0 pv D4 Q16 D16 "
+            "info move Q4 visits 40 winrate 0.2500 scoreLead -3.40 order 1 pv Q4 C16 "
+            "ownership -0.8 0.2 0.5 -0.9"
+        )
+        res = gtp_bridge.parse_analyze_line(kata_line, "W", "kata", 2)
+        self.assertIsNotNone(res)
+        self.assertAlmostEqual(res["winrate"], 0.7, places=4)
+        self.assertAlmostEqual(res["scoreLead"], 2.5, places=2)
+        self.assertEqual(res["visits"], 160)
+        self.assertEqual(res["ownership"], [0.8, -0.2, -0.5, 0.9])
+        self.assertEqual(res["moves"][0]["move"], "D4")
+        self.assertEqual(res["moves"][0]["pv"], ["D4", "Q16", "D16"])
+        self.assertEqual(len(res["moves"]), 2)
+
+        # lz-analyze uses 0..10000 integer winrates and no scoreLead/ownership
+        lz_line = "info move C3 visits 85 winrate 6250 order 0 pv C3 D4 info move D3 visits 20 winrate 5900 order 1 pv D3 C4"
+        res_lz = gtp_bridge.parse_analyze_line(lz_line, "B", "lz", 5)
+        self.assertIsNotNone(res_lz)
+        self.assertAlmostEqual(res_lz["winrate"], 0.625, places=4)
+        self.assertIsNone(res_lz["scoreLead"])
+        self.assertIsNone(res_lz["ownership"])
+        self.assertEqual(res_lz["visits"], 105)
+        self.assertEqual(res_lz["moves"][0]["move"], "C3")
+
+    def test_analyze_streaming_and_cancel_over_websocket(self):
+        # Inline mock GTP engine supporting kata-analyze streaming
+        mock_code = (
+            "import sys, time\n"
+            "for raw in sys.stdin:\n"
+            "    s = raw.strip()\n"
+            "    if not s: continue\n"
+            "    p = s.split()\n"
+            "    cmd = p[0].lower()\n"
+            "    if cmd == 'name': out = '= mock_kata\\n\\n'\n"
+            "    elif cmd == 'version': out = '= 1.0\\n\\n'\n"
+            "    elif cmd == 'list_commands': out = '= name\\nversion\\nboardsize\\nclear_board\\nkomi\\nplay\\ngenmove\\nfinal_score\\nkata-analyze\\n\\n'\n"
+            "    elif cmd in ('boardsize','clear_board','komi','play'): out = '=\\n\\n'\n"
+            "    elif cmd == 'final_score': out = '= B+1.5\\n\\n'\n"
+            "    elif cmd == 'kata-analyze':\n"
+            "        sys.stdout.write('=\\n')\n"
+            "        sys.stdout.write('info move B2 visits 30 winrate 0.62 scoreLead 1.8 order 0 pv B2 C3 ownership 0.5 0.4 0.1 -0.2 -0.5 -0.3 0.2 0.3 0.1\\n')\n"
+            "        sys.stdout.flush()\n"
+            "        # Wait for blank line to stop streaming\n"
+            "        while True:\n"
+            "            nxt = sys.stdin.readline()\n"
+            "            if not nxt or nxt.strip() == '':\n"
+            "                sys.stdout.write('\\n')\n"
+            "                sys.stdout.flush()\n"
+            "                break\n"
+            "        continue\n"
+            "    elif cmd == 'quit':\n"
+            "        sys.stdout.write('=\\n\\n'); sys.stdout.flush(); break\n"
+            "    else: out = '? unknown\\n\\n'\n"
+            "    sys.stdout.write(out); sys.stdout.flush()\n"
+        )
+        port = free_port()
+        engine = gtp_bridge.GtpProcess([sys.executable, "-u", "-c", mock_code], quiet=True)
+        loop_holder: dict = {}
+        ready = threading.Event()
+
+        async def runner():
+            loop_holder["loop"] = asyncio.get_running_loop()
+            await asyncio.to_thread(engine.ensure_running)
+            server = await asyncio.start_server(
+                lambda r, w: gtp_bridge.handle_client(r, w, engine, gtp_bridge.DEFAULT_ORIGINS),
+                "127.0.0.1",
+                port,
+            )
+            loop_holder["server"] = server
+            ready.set()
+            try:
+                async with server:
+                    await server.serve_forever()
+            except asyncio.CancelledError:
+                pass
+
+        th = threading.Thread(target=lambda: asyncio.run(runner()), daemon=True)
+        th.start()
+        self.assertTrue(ready.wait(timeout=10.0))
+        try:
+            client = WsTestClient("127.0.0.1", port)
+            try:
+                hello = client.call("hello", id=1)
+                self.assertTrue(hello["ok"])
+                self.assertTrue(hello["canScore"])
+                self.assertTrue(hello["canAnalyze"])
+                self.assertEqual(hello["analyzeProto"], "kata")
+
+                an = client.call("analyze", id=2, size=3, komi=2.5, color="B", moves=[], maxTimeMs=150, maxMoves=3, includeOwnership=True)
+                self.assertTrue(an["ok"], an)
+                self.assertAlmostEqual(an["winrate"], 0.62, places=3)
+                self.assertAlmostEqual(an["scoreLead"], 1.8, places=2)
+                self.assertEqual(len(an["ownership"]), 9)
+                self.assertEqual(an["moves"][0]["move"], "B2")
+
+                # Engine remains responsive after analyze stops
+                sc = client.call("final_score", id=3, size=3, komi=2.5, moves=[])
+                self.assertTrue(sc["ok"])
+                self.assertEqual(sc["score"], "B+1.5")
+            finally:
+                client.close()
+        finally:
+            loop_holder["loop"].call_soon_threadsafe(loop_holder["server"].close)
+            engine.kill()
+            th.join(timeout=5.0)
+
     def test_origin_filter(self):
         patterns = gtp_bridge.DEFAULT_ORIGINS
         self.assertTrue(gtp_bridge.origin_allowed("https://leonhart999.github.io", patterns))

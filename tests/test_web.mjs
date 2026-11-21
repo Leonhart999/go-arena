@@ -9,6 +9,9 @@ import { MatchRunner, parseScore } from "../web/js/match.js";
 import { DICT, detectLang, translate } from "../web/js/i18n.js";
 import { EnginePlayer, engineLabel } from "../web/js/players.js";
 import { DEFAULT_ICE, parseIceServers, encodeIceParam, decodeIceParam } from "../web/js/net.js";
+import { detectBlunders, formatScoreLead, stripForRecord } from "../web/js/analysis.js";
+import { computeScoreCeiling } from "../web/js/chart.js";
+import { SoundEffects } from "../web/js/audio.js";
 
 test("GTP coordinates skip I and round-trip", () => {
   const b = new Board(19);
@@ -195,14 +198,12 @@ test("i18n dictionary covers all HTML keys in both en and zh", () => {
   assert.ok(translate("zh", "captures", { n: 3 }).includes("3"));
 });
 
-test("engine labels hide engine and model names", () => {
-  const secretInfo = { name: "KataGo", version: "1.18.2+tf3-b11c768-s12382M-d6533M" };
-  assert.equal(engineLabel(secretInfo), "AI");
-  const player = new EnginePlayer({ info: secretInfo }, "Host");
-  assert.equal(player.label, "Host (AI)");
-  assert.ok(!player.label.includes("KataGo"));
-  assert.ok(!player.label.includes("tf3"));
-  assert.equal(new EnginePlayer({ info: secretInfo }).label, "AI");
+test("engine labels combine engine name and version", () => {
+  const info = { name: "Claude's GodHand", version: "v0.5.5" };
+  assert.equal(engineLabel(info), "Claude's GodHand v0.5.5");
+  const player = new EnginePlayer({ info }, "Host");
+  assert.equal(player.label, "Host (Claude's GodHand v0.5.5)");
+  assert.equal(new EnginePlayer({ info }).label, "Claude's GodHand v0.5.5");
 });
 
 test("DEFAULT_ICE omits dead PeerJS TURN domains and ICE link params round-trip", () => {
@@ -220,4 +221,68 @@ test("DEFAULT_ICE omits dead PeerJS TURN domains and ICE link params round-trip"
   assert.ok(!encoded.includes("\n"));
   const decoded = decodeIceParam(encoded);
   assert.deepEqual(JSON.parse(decoded), [{ urls: "turn:relay.example.com:443?transport=tcp", username: "u", credential: "p" }]);
+});
+
+test("analysis blunder detection, formatting, record stripping, and SGF eval comments", () => {
+  const moves = [["B", "D4", 200], ["W", "Q16", 300], ["B", "C10", 400], ["W", "Q4", 250]];
+  const series = [
+    { moveNo: 1, winrate: 0.52, scoreLead: 0.4 },
+    { moveNo: 2, winrate: 0.51, scoreLead: 0.2 },
+    // Black move #3 blunders: winrate drops from 0.51 -> 0.34 (-17%), scoreLead drops 0.2 -> -4.5 (-4.7 pts)
+    { moveNo: 3, winrate: 0.34, scoreLead: -4.5 },
+    // White move #4 blunders back: Black winrate jumps 0.34 -> 0.55 (White lost 21%)
+    { moveNo: 4, winrate: 0.55, scoreLead: 1.0 },
+  ];
+  const blunders = detectBlunders(series, moves);
+  assert.equal(blunders.length, 2);
+  assert.equal(blunders[0].moveNo, 3);
+  assert.equal(blunders[0].color, "B");
+  assert.ok(blunders[0].winrateDrop >= 0.16);
+  assert.equal(blunders[1].moveNo, 4);
+  assert.equal(blunders[1].color, "W");
+
+  assert.equal(formatScoreLead(2.34), "B+2.3");
+  assert.equal(formatScoreLead(-1.8), "W+1.8");
+  assert.equal(formatScoreLead(0.02), "Even");
+
+  const stripped = stripForRecord({
+    moveNo: 3,
+    winrate: 0.34,
+    scoreLead: -4.5,
+    visits: 200,
+    ownership: new Array(361).fill(0.5),
+    moves: [{ move: "D16", visits: 120, winrate: 0.51, scoreLead: 0.2, pv: ["D16", "Q4"] }],
+  });
+  assert.equal("ownership" in stripped, false);
+  assert.equal(stripped.moves.length, 1);
+
+  assert.equal(computeScoreCeiling([{ scoreLead: 4.5 }, { scoreLead: -12.2 }]), 15);
+  assert.equal(computeScoreCeiling([{ scoreLead: 0 }]), 10);
+
+  // SGF includes eval annotations when analysis is present on record
+  const sgf = recordToSgf({
+    index: 0,
+    blackSeat: "A",
+    labels: { A: "A", B: "B" },
+    size: 5,
+    komi: 2.5,
+    koRule: "positional",
+    moves: [["B", "C3", 100]],
+    analysis: [{ moveNo: 1, winrate: 0.612, scoreLead: 1.5 }],
+    result: "B+R",
+    reason: "resign",
+  });
+  assert.ok(sgf.includes("B 61.2%"));
+  assert.ok(sgf.includes("B+1.5"));
+
+  // SoundEffects degrades gracefully in headless Node without AudioContext
+  const mem = new Map();
+  const sfx = new SoundEffects({ getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v) });
+  assert.equal(sfx.enabled, true);
+  sfx.playStone(2);
+  sfx.playPass();
+  sfx.playGameEnd();
+  sfx.setEnabled(false);
+  assert.equal(sfx.enabled, false);
+  assert.equal(mem.get("go-arena.sound"), "0");
 });

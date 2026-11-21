@@ -1,12 +1,15 @@
 // go-arena page controller: wires players, the room, the match runner and the UI.
 import { BoardView } from "./board.js";
-import { GameState, Board, colorFromLetter } from "./go.js";
-import { BridgeClient, EnginePlayer, HumanPlayer, RemotePlayer, Cancelled } from "./players.js";
+import { GameState, Board, colorFromLetter, formatScore } from "./go.js";
+import { BridgeClient, EnginePlayer, HumanPlayer, RemotePlayer, Cancelled, engineLabel } from "./players.js";
 import { MatchRunner } from "./match.js";
 import { HostRoom, GuestRoom, normalizeCode, parseIceServers, encodeIceParam, decodeIceParam } from "./net.js";
 import { summarize, formatElo } from "./stats.js";
 import { recordToSgf, recordsToSgfCollection, recordsToCsv } from "./sgf.js";
 import { LANG_KEY, applyDomTranslations, detectLang, translate } from "./i18n.js";
+import { AnalysisManager, detectBlunders, formatScoreLead, stripForRecord } from "./analysis.js";
+import { AnalysisChart } from "./chart.js";
+import { SoundEffects } from "./audio.js";
 
 const $ = (id) => document.getElementById(id);
 const STORE = "go-arena.";
@@ -27,7 +30,13 @@ const app = {
   lang: detectLang(),
   theme: detectTheme(),
   tab: "setup",
-  showNumbers: false,
+  numberMode: "last", // "last" | "last5" | "all"
+  showTerritory: false,
+  showCandidates: false,
+  sound: new SoundEffects(),
+  analyzer: new AnalysisManager(),
+  analysisBusy: false,
+  liveAnalysis: new Map(), // gameKey -> Map<moveNo, entry>
   role: "host", // "host" (also when no room is open) or "guest"
   myBridge: null,
   bBridge: null,
@@ -42,6 +51,7 @@ const app = {
   records: [],
   view: null, // guest: latest state from the host
   viewAt: 0,
+  lastSoundMoveKey: "",
   review: null, // { rec, moveNo }
   guestReq: null, // guest: { req, player } being answered
   mySeat: null,
@@ -154,7 +164,7 @@ function myName() {
 function myLabel() {
   if ($("my-kind").value === "human") return `${myName()} (${t("humanSuffix")})`;
   const info = app.myBridge?.info;
-  return info ? `${myName()} (${t("engineSuffix")})` : `${myName()} (${t("noEngineSuffix")})`;
+  return info ? `${myName()} (${engineLabel(info)})` : `${myName()} (${t("noEngineSuffix")})`;
 }
 
 function myPlayer() {
@@ -162,7 +172,7 @@ function myPlayer() {
     app.myHuman.owner = myName();
     return app.myHuman;
   }
-  return app.myBridge?.info ? new EnginePlayer(app.myBridge, myName(), t("engineSuffix")) : null;
+  return app.myBridge?.info ? new EnginePlayer(app.myBridge, myName()) : null;
 }
 
 function seatBPlayer() {
@@ -170,7 +180,7 @@ function seatBPlayer() {
     case "remote":
       return app.remote?.player ?? null;
     case "engine":
-      return app.bBridge?.info ? new EnginePlayer(app.bBridge, t("localBName"), t("engineSuffix")) : null;
+      return app.bBridge?.info ? new EnginePlayer(app.bBridge, t("localBName")) : null;
     default:
       app.bHuman.owner = t("localBName");
       return app.bHuman;
@@ -182,7 +192,7 @@ function seatBLabel() {
     case "remote":
       return app.remote?.player.label ?? t("waitingGuestLabel");
     case "engine":
-      return app.bBridge?.info ? `${t("localBName")} (${t("engineSuffix")})` : t("engineBNotConn");
+      return app.bBridge?.info ? `${t("localBName")} (${engineLabel(app.bBridge.info)})` : t("engineBNotConn");
     default:
       app.bHuman.owner = t("localBName");
       return `${t("localBName")} (${t("humanSuffix")})`;
@@ -217,6 +227,29 @@ function setBridgeHint(which, key, vars = {}, kind = "", raw = null) {
   setHint(BRIDGES[which].status, text, kind);
 }
 
+function readAnalysisConfig() {
+  const num = (id, def, min, max) => {
+    const v = Number($(id)?.value);
+    return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def;
+  };
+  return {
+    liveEval: !!$("cfg-live-eval")?.checked,
+    shareEval: !!$("cfg-share-eval")?.checked,
+    maxTimeMs: Math.round(num("cfg-eval-ms", 500, 100, 10000)),
+    maxVisits: Math.round(num("cfg-eval-visits", 0, 0, 10000)),
+  };
+}
+
+function refCapSuffix(info) {
+  if (!info) return "";
+  const canScore = info.canScore ?? !!info.commands?.includes("final_score");
+  const canAnalyze = info.canAnalyze ?? !!(info.commands?.includes("kata-analyze") || info.commands?.includes("lz-analyze"));
+  if (canScore && canAnalyze) return t("bridgeCapFull");
+  if (canAnalyze) return t("bridgeCapAnalyze");
+  if (canScore) return t("bridgeCapScore");
+  return t("bridgeNoScore");
+}
+
 function refreshBridgeHints() {
   for (const which of Object.keys(BRIDGES)) {
     const st = app.bridgeHintState[which];
@@ -224,8 +257,8 @@ function refreshBridgeHints() {
     if (st.raw !== null) setHint(BRIDGES[which].status, st.raw, st.kind);
     else if (st.key === "bridgeConnected") {
       const info = app[BRIDGES[which].key]?.info;
-      const extra = which === "ref" && info && !info.commands?.includes("final_score") ? t("bridgeNoScore") : "";
-      setHint(BRIDGES[which].status, t("bridgeConnected", { label: t("bridgeReadyLabel"), extra }), st.kind);
+      const extra = which === "ref" ? refCapSuffix(info) : "";
+      setHint(BRIDGES[which].status, t("bridgeConnected", { label: info ? engineLabel(info) : st.vars.label, extra }), st.kind);
     } else {
       setHint(BRIDGES[which].status, t(st.key, st.vars), st.kind);
     }
@@ -238,6 +271,7 @@ async function connectBridge(which) {
   if (!url) return setBridgeHint(which, "bridgeEnterUrl", {}, "err");
   app[spec.key]?.close();
   app[spec.key] = null;
+  if (which === "ref") app.analyzer.setBridge(null);
   const client = new BridgeClient(url);
   setBridgeHint(which, "bridgeConnecting", { url });
   try {
@@ -245,13 +279,15 @@ async function connectBridge(which) {
     setBridgeHint(which, "bridgeWaitStart");
     const info = await client.hello();
     app[spec.key] = client;
-    const label = t("bridgeReadyLabel");
-    const extra = which === "ref" && !info.commands?.includes("final_score") ? t("bridgeNoScore") : "";
+    if (which === "ref") app.analyzer.setBridge(client);
+    const label = engineLabel(info);
+    const extra = which === "ref" ? refCapSuffix(info) : "";
     setBridgeHint(which, "bridgeConnected", { label, extra }, "ok");
     log(t("logBridgeConnected", { url, label }));
     client.addEventListener("close", () => {
       if (app[spec.key] !== client) return;
       app[spec.key] = null;
+      if (which === "ref") app.analyzer.setBridge(null);
       setBridgeHint(which, "bridgeDisconnected", {}, "err");
       log(t("logBridgeLost", { url }));
       onSeatsChanged();
@@ -264,6 +300,156 @@ async function connectBridge(which) {
 }
 
 // ---------------------------------------------------------------------------
+// Live analysis & evaluation helpers
+// ---------------------------------------------------------------------------
+function gameKeyOf(curOrRec) {
+  if (!curOrRec) return "";
+  return `g${curOrRec.index}:${curOrRec.size}:${curOrRec.komi}`;
+}
+
+function getGameEvalMap(gameKey, create = false) {
+  if (!gameKey) return null;
+  let m = app.liveAnalysis.get(gameKey);
+  if (!m && create) {
+    m = new Map();
+    app.liveAnalysis.set(gameKey, m);
+  }
+  return m || null;
+}
+
+function getAnalysisSeriesForCurrent(v) {
+  if (app.review) {
+    const rec = app.review.rec;
+    const key = gameKeyOf(rec);
+    const liveMap = getGameEvalMap(key, false);
+    const merged = new Map();
+    if (Array.isArray(rec.analysis)) {
+      for (const item of rec.analysis) {
+        if (item && Number.isInteger(item.moveNo)) merged.set(item.moveNo, item);
+      }
+    }
+    if (liveMap) {
+      for (const [k, val] of liveMap) merged.set(k, val);
+    }
+    return {
+      key,
+      moves: rec.moves,
+      moveNo: app.review.moveNo,
+      map: merged,
+      series: [...merged.values()].sort((a, b) => a.moveNo - b.moveNo),
+    };
+  }
+  const cur = v?.current;
+  if (!cur) return { key: "", moves: [], moveNo: 0, map: new Map(), series: [] };
+  const key = gameKeyOf(cur);
+  const merged = new Map();
+  if (Array.isArray(cur.analysis)) {
+    for (const item of cur.analysis) {
+      if (item && Number.isInteger(item.moveNo)) merged.set(item.moveNo, item);
+    }
+  }
+  const liveMap = getGameEvalMap(key, false);
+  if (liveMap) {
+    for (const [k, val] of liveMap) merged.set(k, val);
+  }
+  return {
+    key,
+    moves: cur.moves,
+    moveNo: cur.moves.length,
+    map: merged,
+    series: [...merged.values()].sort((a, b) => a.moveNo - b.moveNo),
+  };
+}
+
+function latestEvalAt(series, moveNo) {
+  if (!series.length) return null;
+  let best = null;
+  for (const item of series) {
+    if (item.moveNo <= moveNo) best = item;
+    else break;
+  }
+  return best;
+}
+
+// Anti-cheat / spoiler gate: hide AI candidate moves while an active player
+// (human on this page, or seated remote guest) is playing a live game.
+function canShowCandidates(v) {
+  if (app.review) return true;
+  const cur = v?.current;
+  if (!cur || cur.result) return true;
+  if (app.role === "guest" && app.mySeat) return false;
+  if (app.role === "host") {
+    const aHuman = $("my-kind").value === "human";
+    const bHuman = $("b-kind").value === "human";
+    if (aHuman || bHuman) return false;
+  }
+  return true;
+}
+
+function scheduleLiveAnalysis(cur) {
+  if (app.role !== "host" || !cur || cur.result) return;
+  const cfg = readAnalysisConfig();
+  if (!cfg.liveEval || !app.analyzer.capable) return;
+  const moveNo = cur.moves.length;
+  const toPlay = moveNo % 2 === 0 ? "B" : "W";
+  app.analyzer.request({
+    gameKey: gameKeyOf(cur),
+    moveNo,
+    size: cur.size,
+    komi: cur.komi,
+    color: toPlay,
+    moves: cur.moves,
+    maxTimeMs: cfg.maxTimeMs,
+    maxVisits: cfg.maxVisits,
+    maxMoves: 5,
+    includeOwnership: true,
+  });
+}
+
+function triggerManualAnalysis() {
+  if (!app.analyzer.capable) {
+    log(t("logAnalyzeNeedBridge"));
+    return;
+  }
+  const cfg = readAnalysisConfig();
+  if (app.review) {
+    const { rec, moveNo } = app.review;
+    const slice = rec.moves.slice(0, moveNo);
+    const toPlay = moveNo % 2 === 0 ? "B" : "W";
+    app.analyzer.request({
+      gameKey: gameKeyOf(rec),
+      moveNo,
+      size: rec.size,
+      komi: rec.komi,
+      color: toPlay,
+      moves: slice,
+      maxTimeMs: Math.max(cfg.maxTimeMs, 800),
+      maxVisits: cfg.maxVisits,
+      maxMoves: 5,
+      includeOwnership: true,
+    });
+    return;
+  }
+  const v = currentView();
+  const cur = v?.current;
+  if (!cur) return;
+  const moveNo = cur.moves.length;
+  const toPlay = moveNo % 2 === 0 ? "B" : "W";
+  app.analyzer.request({
+    gameKey: gameKeyOf(cur),
+    moveNo,
+    size: cur.size,
+    komi: cur.komi,
+    color: toPlay,
+    moves: cur.moves,
+    maxTimeMs: Math.max(cfg.maxTimeMs, 800),
+    maxVisits: cfg.maxVisits,
+    maxMoves: 5,
+    includeOwnership: true,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Match control (host)
 // ---------------------------------------------------------------------------
 function startMatch() {
@@ -273,20 +459,42 @@ function startMatch() {
   if (!a) return log(t("logNeedSeatA"));
   if (!b) return log(t("logNeedSeatB"));
   if (app.records.length && !confirm(t("confirmNewMatch"))) return;
-  const referee = app.refBridge?.info ? new EnginePlayer(app.refBridge, "referee", t("engineSuffix")) : null;
+  const canRefScore = app.refBridge?.info && (app.refBridge.info.canScore ?? app.refBridge.info.commands?.includes("final_score"));
+  const referee = canRefScore ? new EnginePlayer(app.refBridge, "referee") : null;
   const runner = new MatchRunner(readConfig(), { A: a, B: b }, { referee });
   app.runner = runner;
   app.records = [];
   app.review = null;
+  app.liveAnalysis.clear();
+  app.analyzer.clearOwnership();
+  app.analyzer.cancel();
   saveRecords();
   broadcast({ t: "records", records: [] });
   runner.addEventListener("state", update);
-  runner.addEventListener("move", update);
+  runner.addEventListener("move", (e) => {
+    const d = e.detail;
+    if (d) {
+      if (String(d.move).toLowerCase() === "pass") app.sound.playPass();
+      else app.sound.playStone(d.captured || 0);
+    }
+    update();
+    const cur = runner.snapshot().current;
+    if (cur && !cur.result) scheduleLiveAnalysis(cur);
+  });
   runner.addEventListener("log", (e) => log(e.detail));
   runner.addEventListener("record", (e) => {
-    app.records.push(e.detail);
+    const rec = e.detail;
+    const key = gameKeyOf(rec);
+    const evalMap = getGameEvalMap(key, false);
+    if (evalMap && evalMap.size) {
+      rec.analysis = [...evalMap.values()]
+        .sort((x, y) => x.moveNo - y.moveNo)
+        .map(stripForRecord);
+    }
+    app.records.push(rec);
     saveRecords();
-    broadcast({ t: "record", record: e.detail });
+    broadcast({ t: "record", record: rec });
+    app.sound.playGameEnd();
     renderResults();
   });
   runner.addEventListener("done", () => log(t("logMatchDone")));
@@ -299,17 +507,30 @@ function startMatch() {
   update();
 }
 
-function hostView() {
+function hostView({ includeEval = false, stripCandidates = false } = {}) {
   const v = app.runner ? app.runner.snapshot() : { running: false, paused: false, config: readConfig(), current: null };
   if (!v.running) v.seats = { A: myLabel(), B: seatBLabel() };
   v.played = app.records.filter((r) => !r.void).length;
+  if (includeEval && v.current) {
+    const key = gameKeyOf(v.current);
+    const evalMap = getGameEvalMap(key, false);
+    if (evalMap && evalMap.size) {
+      v.current.analysis = [...evalMap.values()]
+        .sort((a, b) => a.moveNo - b.moveNo)
+        .map((item) => {
+          const slim = stripForRecord(item);
+          if (stripCandidates) delete slim.moves;
+          return slim;
+        });
+    }
+  }
   return v;
 }
 
 function currentView() {
   if (app.role === "host") {
     app.viewAt = Date.now();
-    return hostView();
+    return hostView({ includeEval: true });
   }
   return app.view;
 }
@@ -322,7 +543,15 @@ function broadcast(msg) {
 }
 
 function broadcastState() {
-  broadcast({ t: "state", view: hostView() });
+  if (app.role !== "host" || !app.room) return;
+  const shareEval = readAnalysisConfig().shareEval;
+  const plainView = hostView({ includeEval: false });
+  const specView = shareEval ? hostView({ includeEval: true, stripCandidates: true }) : plainView;
+  for (const [conn, peer] of app.peers) {
+    const isSeatedPlayer = app.remote?.conn === conn || peer.role === "player";
+    const viewForPeer = isSeatedPlayer ? plainView : specView;
+    app.room.send(conn, { t: "state", view: viewForPeer });
+  }
 }
 
 async function createRoom() {
@@ -510,11 +739,23 @@ function onGuestMessage(msg) {
       app.hostLabel = msg.host;
       update();
       break;
-    case "state":
+    case "state": {
+      const prevCur = app.view?.current;
+      const nextCur = msg.view?.current;
       app.view = msg.view;
       app.viewAt = Date.now();
+      if (nextCur && nextCur.moves.length > 0) {
+        const moveKey = `${nextCur.index}:${nextCur.moves.length}`;
+        if (moveKey !== app.lastSoundMoveKey && (!prevCur || prevCur.index !== nextCur.index || nextCur.moves.length > prevCur.moves.length)) {
+          app.lastSoundMoveKey = moveKey;
+          const lastMv = nextCur.moves[nextCur.moves.length - 1]?.[1] ?? "";
+          if (String(lastMv).toLowerCase() === "pass") app.sound.playPass();
+          else app.sound.playStone(0);
+        }
+      }
       update();
       break;
+    }
     case "records":
       app.records = Array.isArray(msg.records) ? msg.records : [];
       renderResults();
@@ -586,6 +827,7 @@ function leaveRoom() {
 // Rendering
 // ---------------------------------------------------------------------------
 let boardView;
+let evalChart;
 
 function replayFor(cur) {
   const key = `${cur.index}|${cur.size}|${cur.koRule}|${cur.komi}`;
@@ -606,9 +848,10 @@ function replayFor(cur) {
 }
 
 function computeMoveNumbers(board, moves) {
-  if (!app.showNumbers || !moves?.length) return null;
+  if (app.numberMode === "last" || !moves?.length) return null;
+  const start = app.numberMode === "last5" ? Math.max(0, moves.length - 5) : 0;
   const map = new Map();
-  for (let i = 0; i < moves.length; i++) {
+  for (let i = start; i < moves.length; i++) {
     const mv = String(moves[i][1] ?? "").trim();
     if (!mv || mv.toLowerCase() === "pass") continue;
     try {
@@ -622,6 +865,11 @@ function computeMoveNumbers(board, moves) {
 }
 
 function renderBoard(v) {
+  const evalCtx = getAnalysisSeriesForCurrent(v);
+  const curEval = evalCtx.map.get(evalCtx.moveNo) ?? null;
+  const allowCands = app.showCandidates && canShowCandidates(v);
+  const candidates = allowCands && curEval?.moves?.length ? curEval.moves : null;
+
   if (app.review) {
     const { rec, moveNo } = app.review;
     const g = new GameState(rec.size, rec.komi, rec.koRule);
@@ -631,29 +879,214 @@ function renderBoard(v) {
     } catch (e) {
       console.warn(e);
     }
-    const owner = moveNo === rec.moves.length && /Tromp-Taylor/.test(rec.reason) ? g.trompTaylor().owner : null;
+    const aiOwn = app.showTerritory ? app.analyzer.getOwnership(evalCtx.key, moveNo) : null;
+    const ttOwner = app.showTerritory && !aiOwn
+      ? g.trompTaylor().owner
+      : moveNo === rec.moves.length && /Tromp-Taylor/.test(rec.reason)
+        ? g.trompTaylor().owner
+        : null;
     boardView.render({
       size: rec.size,
       stones: g.board.stones,
       lastPoint: g.lastPoint,
-      owner,
+      owner: ttOwner,
+      ownership: aiOwn,
       moveNumbers: computeMoveNumbers(g.board, slice),
+      candidates,
+      toPlay: g.toPlay,
     });
     return;
   }
   const cur = v?.current;
   if (cur) {
     const g = replayFor(cur);
+    const aiOwn = app.showTerritory ? app.analyzer.getOwnership(evalCtx.key, cur.moves.length) : null;
+    const ttOwner = app.showTerritory && !aiOwn
+      ? g.trompTaylor().owner
+      : cur.owner
+        ? Uint8Array.from(cur.owner)
+        : null;
     boardView.render({
       size: cur.size,
       stones: g.board.stones,
       lastPoint: g.lastPoint,
-      owner: cur.owner ? Uint8Array.from(cur.owner) : null,
+      owner: ttOwner,
+      ownership: aiOwn,
       moveNumbers: computeMoveNumbers(g.board, cur.moves),
+      candidates,
+      toPlay: g.toPlay,
     });
   } else {
     const size = v?.config?.size ?? (Number($("cfg-size").value) || 19);
     boardView.render({ size, stones: new Board(size, "simple").stones, lastPoint: null });
+  }
+}
+
+function formatLeadLocalized(scoreLead) {
+  if (typeof scoreLead !== "number" || !Number.isFinite(scoreLead)) return "";
+  const base = formatScoreLead(scoreLead, {
+    black: t("evalBlackShort"),
+    white: t("evalWhiteShort"),
+    even: t("evalEven"),
+  });
+  return base === t("evalEven") ? base : t("evalPts", { text: base });
+}
+
+function renderAnalysis(v) {
+  const evalCtx = getAnalysisSeriesForCurrent(v);
+  const latest = latestEvalAt(evalCtx.series, evalCtx.moveNo);
+  const exact = evalCtx.map.get(evalCtx.moveNo) ?? null;
+
+  // Top winrate bar
+  const barWrap = $("eval-bar-wrap");
+  if (barWrap) {
+    barWrap.hidden = !latest;
+    if (latest) {
+      const bPct = Math.max(0, Math.min(100, latest.winrate * 100));
+      const wPct = 100 - bPct;
+      $("eval-black-pct").textContent = `${t("evalBlackShort")} ${bPct.toFixed(1)}%`;
+      $("eval-white-pct").textContent = `${t("evalWhiteShort")} ${wPct.toFixed(1)}%`;
+      $("eval-lead").textContent = formatLeadLocalized(latest.scoreLead);
+      $("eval-bar-fill").style.width = `${bPct.toFixed(1)}%`;
+      const meter = barWrap.querySelector(".eval-bar");
+      if (meter) meter.setAttribute("aria-valuenow", bPct.toFixed(1));
+    }
+  }
+
+  // Analysis tab KPIs
+  $("eval-busy-dot").hidden = !app.analysisBusy;
+  $("btn-analyze-now").disabled = !app.analyzer.capable || (!app.review && !v?.current);
+  $("an-winrate").textContent = latest ? `${(latest.winrate * 100).toFixed(1)}%` : "--";
+  $("an-lead").textContent = latest && typeof latest.scoreLead === "number" ? formatLeadLocalized(latest.scoreLead) : "--";
+  $("an-visits").textContent = latest && latest.visits ? String(latest.visits) : "--";
+
+  // Tromp-Taylor area estimate fallback note
+  const ttNode = $("an-tt-estimate");
+  if (ttNode) {
+    let g = null;
+    if (app.review) {
+      const { rec, moveNo } = app.review;
+      g = new GameState(rec.size, rec.komi, rec.koRule);
+      try {
+        for (const [c, mv, ms] of rec.moves.slice(0, moveNo)) g.apply(colorFromLetter(c), mv, ms);
+      } catch {
+        g = null;
+      }
+    } else if (v?.current) {
+      g = replayFor(v.current);
+    }
+    if (g && g.moves.length > 0) {
+      const tt = g.trompTaylor();
+      ttNode.textContent = t("evalTtFallback", { b: tt.black, w: tt.white, diff: formatScore(tt.diff) });
+    } else {
+      ttNode.textContent = "";
+    }
+  }
+
+  // Blunders + SVG chart
+  const blunders = detectBlunders(evalCtx.series, evalCtx.moves);
+  if (evalChart) {
+    evalChart.render({
+      points: evalCtx.series,
+      blunders,
+      totalMoves: evalCtx.moves.length,
+      currentMove: evalCtx.moveNo,
+      emptyText: t("evalChartEmpty"),
+    });
+  }
+
+  // Top AI candidates list
+  const candList = $("an-cands-list");
+  if (candList) {
+    candList.replaceChildren();
+    const allowCands = canShowCandidates(v);
+    if (!allowCands) {
+      const div = document.createElement("div");
+      div.className = "an-empty";
+      div.textContent = t("evalCandsHidden");
+      candList.appendChild(div);
+    } else if (!exact?.moves?.length) {
+      const div = document.createElement("div");
+      div.className = "an-empty";
+      div.textContent = t("evalNoCands");
+      candList.appendChild(div);
+    } else {
+      const sideIsBlack = evalCtx.moveNo % 2 === 0;
+      exact.moves.slice(0, 5).forEach((m, idx) => {
+        const row = document.createElement("div");
+        row.className = `an-cand-row${idx === 0 ? " best" : ""}`;
+        const mv = document.createElement("span");
+        mv.className = "an-cand-move";
+        mv.textContent = m.move;
+        const wr = document.createElement("span");
+        wr.className = "an-cand-wr";
+        const moverWr = sideIsBlack ? m.winrate : 1 - m.winrate;
+        wr.textContent = `${(moverWr * 100).toFixed(1)}%`;
+        const lead = document.createElement("span");
+        lead.className = "an-cand-lead";
+        lead.textContent = typeof m.scoreLead === "number" ? formatLeadLocalized(m.scoreLead) : "";
+        const pv = document.createElement("span");
+        pv.className = "an-cand-pv";
+        pv.textContent = (m.pv || []).slice(0, 6).join(" ");
+        pv.title = (m.pv || []).join(" ");
+        row.append(mv, wr, lead, pv);
+        row.addEventListener("mouseenter", () => boardView?._renderPv(m));
+        row.addEventListener("mouseleave", () => boardView?._renderPv(null));
+        candList.appendChild(row);
+      });
+    }
+  }
+
+  // Turning points / blunders list
+  const bList = $("an-blunders-list");
+  const bPill = $("an-blunder-count");
+  if (bPill) {
+    bPill.textContent = String(blunders.length);
+    bPill.hidden = blunders.length === 0;
+  }
+  if (bList) {
+    bList.replaceChildren();
+    if (!blunders.length) {
+      const div = document.createElement("div");
+      div.className = "an-empty";
+      div.textContent = t("evalNoBlunders");
+      bList.appendChild(div);
+    } else {
+      const top = [...blunders]
+        .sort((a, b) => Math.max(b.winrateDrop * 100, (b.scoreDrop ?? 0) * 2) - Math.max(a.winrateDrop * 100, (a.scoreDrop ?? 0) * 2))
+        .slice(0, 8);
+      for (const b of top) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "an-blunder-btn";
+        btn.title = t("evalJumpHint");
+        btn.textContent = t("evalBlunderItem", {
+          moveNo: b.moveNo,
+          color: b.color,
+          vertex: b.vertex,
+          dWr: (b.winrateDrop * 100).toFixed(1),
+          dScore: b.scoreDrop !== null ? b.scoreDrop.toFixed(1) : null,
+        });
+        btn.onclick = () => jumpToMoveFromChart(b.moveNo);
+        bList.appendChild(btn);
+      }
+    }
+  }
+}
+
+function jumpToMoveFromChart(moveNo) {
+  if (app.review) {
+    stepReview(moveNo);
+    return;
+  }
+  // If a finished game is shown or records exist, allow jumping into review of the latest finished game
+  const cur = currentView()?.current;
+  if (cur && cur.result) {
+    const rec = app.records.find((r) => r.index === cur.index);
+    if (rec) {
+      openReview(rec);
+      stepReview(moveNo);
+    }
   }
 }
 
@@ -760,7 +1193,24 @@ function renderControls(v) {
   const bReady = !!seatBPlayer();
   const bErr = $("b-kind").value === "engine" && app.bridgeHintState.b?.kind === "err";
   $("dot-match").className = "sum-dot" + (bReady ? " ok" : bErr ? " err" : "");
-  $("btn-numbers").classList.toggle("active", app.showNumbers);
+
+  const numBtn = $("btn-numbers");
+  numBtn.classList.toggle("active", app.numberMode !== "last");
+  numBtn.textContent = app.numberMode === "all"
+    ? t("btnNumbersAll")
+    : app.numberMode === "last5"
+      ? t("btnNumbersLast5")
+      : t("btnNumbers");
+
+  const terrBtn = $("btn-territory");
+  if (terrBtn) terrBtn.classList.toggle("active", app.showTerritory);
+
+  const candBtn = $("btn-candidates");
+  if (candBtn) {
+    const allowed = canShowCandidates(v);
+    candBtn.disabled = !allowed;
+    candBtn.classList.toggle("active", app.showCandidates && allowed);
+  }
 }
 
 function renderRoom() {
@@ -948,6 +1398,7 @@ function updateReviewLabel() {
 function update() {
   const v = currentView();
   renderBoard(v);
+  renderAnalysis(v);
   renderPlayers(v);
   renderStatus(v);
   renderControls(v);
@@ -959,6 +1410,16 @@ function update() {
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
+function applySoundToggle() {
+  const btn = $("sound-toggle");
+  if (!btn) return;
+  const muted = !app.sound.enabled;
+  btn.classList.toggle("muted", muted);
+  const label = t(muted ? "soundUnmute" : "soundMute");
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+}
+
 function applyTheme() {
   document.documentElement.dataset.theme = app.theme;
   const btn = $("theme-toggle");
@@ -1000,6 +1461,7 @@ function setLanguage(lang) {
   }
   applyDomTranslations(document, app.lang);
   applyTheme();
+  applySoundToggle();
   refreshBridgeHints();
   if (app.runner?.running) {
     app.runner.setSeat("A", myPlayer() || app.runner.seats.A);
@@ -1032,8 +1494,52 @@ function init() {
   restoreInputs();
   applyDomTranslations(document, app.lang);
   applyTheme();
+  applySoundToggle();
   setTab(app.tab);
   boardView = new BoardView($("board"), { onClick: onBoardClick });
+  evalChart = new AnalysisChart($("eval-chart"), {
+    onSelectMove: jumpToMoveFromChart,
+    formatTooltip: (pt) => t("evalTooltip", {
+      moveNo: pt.moveNo,
+      wr: (pt.winrate * 100).toFixed(1),
+      lead: formatLeadLocalized(pt.scoreLead),
+    }),
+  });
+
+  app.analyzer.addEventListener("busy", (e) => {
+    app.analysisBusy = !!e.detail?.busy;
+    const dot = $("eval-busy-dot");
+    if (dot) dot.hidden = !app.analysisBusy;
+  });
+  app.analyzer.addEventListener("result", (e) => {
+    const entry = e.detail;
+    const map = getGameEvalMap(entry.gameKey, true);
+    if (map) {
+      map.set(entry.moveNo, {
+        moveNo: entry.moveNo,
+        winrate: entry.winrate,
+        scoreLead: entry.scoreLead,
+        visits: entry.visits,
+        moves: entry.moves,
+      });
+    }
+    // Also attach to matching finished record if analyzing in review mode
+    if (app.review && gameKeyOf(app.review.rec) === entry.gameKey) {
+      const rec = app.review.rec;
+      if (!Array.isArray(rec.analysis)) rec.analysis = [];
+      const idx = rec.analysis.findIndex((x) => x.moveNo === entry.moveNo);
+      const slim = stripForRecord(entry);
+      if (idx >= 0) rec.analysis[idx] = slim;
+      else rec.analysis.push(slim);
+      rec.analysis.sort((a, b) => a.moveNo - b.moveNo);
+      saveRecords();
+    }
+    update();
+  });
+  app.analyzer.addEventListener("error", (e) => {
+    const msg = e.detail?.error?.message;
+    if (msg) log(t("logAnalyzeErr", { msg }));
+  });
 
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.get("room")) {
@@ -1065,9 +1571,34 @@ function init() {
 
   $("lang-toggle").onclick = () => setLanguage(app.lang === "zh" ? "en" : "zh");
   $("theme-toggle").onclick = () => setTheme(app.theme === "dark" ? "light" : "dark");
-  $("btn-numbers").onclick = () => {
-    app.showNumbers = !app.showNumbers;
+  $("sound-toggle").onclick = () => {
+    app.sound.setEnabled(!app.sound.enabled);
+    applySoundToggle();
+  };
+  $("btn-territory").onclick = () => {
+    app.showTerritory = !app.showTerritory;
     update();
+  };
+  $("btn-candidates").onclick = () => {
+    app.showCandidates = !app.showCandidates;
+    update();
+  };
+  $("btn-numbers").onclick = () => {
+    const order = ["last", "last5", "all"];
+    app.numberMode = order[(order.indexOf(app.numberMode) + 1) % order.length];
+    update();
+  };
+  $("btn-analyze-now").onclick = triggerManualAnalysis;
+  for (const btn of document.querySelectorAll(".seg-btn[data-chart-mode]")) {
+    btn.onclick = () => {
+      for (const b of document.querySelectorAll(".seg-btn[data-chart-mode]")) {
+        b.classList.toggle("active", b === btn);
+      }
+      evalChart.setMode(btn.dataset.chartMode);
+    };
+  }
+  $("cfg-share-eval").onchange = () => {
+    if (app.role === "host") broadcastState();
   };
   for (const btn of document.querySelectorAll(".tab[data-tab]")) {
     btn.onclick = () => setTab(btn.dataset.tab);

@@ -19,6 +19,10 @@
     <span id="role-badge" class="badge">local</span>
     <span class="spacer"></span>
     <a id="doc-link" class="top-link" href="https://github.com/Leonhart999/go-arena#readme" target="_blank" rel="noopener">How to connect an engine</a>
+    <button id="sound-toggle" class="icon-btn" type="button" title="Toggle sound" aria-label="Toggle sound">
+      <svg class="ic ic-sound-on" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8h3l4-3.5v11L6.5 12h-3z"/><path d="M13.5 7.2a4 4 0 0 1 0 5.6"/><path d="M15.8 5a7 7 0 0 1 0 10"/></svg>
+      <svg class="ic ic-sound-off" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8h3l4-3.5v11L6.5 12h-3z"/><path d="M13.5 7.5l4 5M17.5 7.5l-4 5"/></svg>
+    </button>
     <button id="theme-toggle" class="icon-btn" type="button" title="Switch theme" aria-label="Switch theme">
       <svg class="ic ic-moon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 11.8A6.8 6.8 0 0 1 8.2 3.5a6.8 6.8 0 1 0 8.3 8.3z"/></svg>
       <svg class="ic ic-sun" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="3.6"/><path d="M10 2.2v1.6M10 16.2v1.6M3.8 10H2.2M17.8 10h-1.6M4.8 4.8l1.1 1.1M14.1 14.1l1.1 1.1M15.2 4.8l-1.1 1.1M5.9 14.1l-1.1 1.1"/></svg>
@@ -47,6 +51,18 @@
         </div>
       </div>
 
+      <div id="eval-bar-wrap" class="eval-bar-wrap" hidden>
+        <div class="eval-bar-labels">
+          <span id="eval-black-pct" class="eval-pct eval-b">50.0%</span>
+          <span id="eval-lead" class="eval-lead"></span>
+          <span id="eval-white-pct" class="eval-pct eval-w">50.0%</span>
+        </div>
+        <div class="eval-bar" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" aria-label="Black winrate">
+          <div id="eval-bar-fill" class="eval-bar-fill" style="width: 50%"></div>
+          <div class="eval-bar-mid" aria-hidden="true"></div>
+        </div>
+      </div>
+
       <div class="board-stage">
         <div id="board" class="board-wrap"></div>
       </div>
@@ -59,7 +75,9 @@
           <button id="btn-pass" data-i18n="btnPass">Pass</button>
           <button id="btn-resign" class="danger" data-i18n="btnResign">Resign</button>
         </span>
-        <button id="btn-numbers" class="chip-btn" type="button" data-i18n="btnNumbers" data-i18n-title="titleNumbers" title="Show move numbers on stones">Move #</button>
+        <button id="btn-territory" class="chip-btn" type="button" data-i18n="btnTerritory" data-i18n-title="titleTerritory" title="Show territory estimate">Territory</button>
+        <button id="btn-candidates" class="chip-btn" type="button" data-i18n="btnCandidates" data-i18n-title="titleCandidates" title="Show AI recommended moves & PV on hover">AI Moves</button>
+        <button id="btn-numbers" class="chip-btn" type="button" data-i18n="btnNumbers" data-i18n-title="titleNumbers" title="Cycle move numbers: last / last 5 / all">Move #</button>
       </div>
 
       <div id="review-bar" class="review-bar" hidden>
@@ -88,6 +106,9 @@
       <nav class="tabs" role="tablist">
         <button class="tab active" type="button" role="tab" data-tab="setup" aria-selected="true">
           <span data-i18n="tabSetup">Setup</span>
+        </button>
+        <button class="tab" type="button" role="tab" data-tab="analysis" aria-selected="false">
+          <span data-i18n="tabAnalysis">Analysis</span>
         </button>
         <button class="tab" type="button" role="tab" data-tab="results" aria-selected="false">
           <span data-i18n="tabResults">Results</span>
@@ -199,13 +220,75 @@
               <label class="check"><input type="checkbox" id="cfg-alternate" data-persist checked> <span data-i18n="chkAlternate">alternate colors</span></label>
             </div>
             <div class="row">
-              <label for="ref-url" data-i18n="lblReferee">Referee</label>
-              <input id="ref-url" data-persist placeholder="optional bridge for final_score" data-i18n-placeholder="phReferee" spellcheck="false">
+              <label for="ref-url" data-i18n="lblReferee">Analyzer</label>
+              <input id="ref-url" data-persist placeholder="optional bridge for scoring & live analysis" data-i18n-placeholder="phReferee" spellcheck="false">
               <button id="ref-connect" data-i18n="btnConnect">Connect</button>
             </div>
-            <div class="hint" id="ref-status" data-i18n="refStatusDefault">Without a referee, finished games are scored by Tromp-Taylor area counting (dead stones must be captured).</div>
+            <div class="hint" id="ref-status" data-i18n="refStatusDefault">Optional referee &amp; analyzer engine (e.g., KataGo). Without it, finished games use Tromp-Taylor area counting.</div>
+            <div class="analyzer-opts">
+              <label class="check"><input type="checkbox" id="cfg-live-eval" data-persist checked> <span data-i18n="chkLiveEval">Live winrate &amp; score</span></label>
+              <label class="check"><input type="checkbox" id="cfg-share-eval" data-persist checked> <span data-i18n="chkShareEval">Share with spectators</span></label>
+              <div class="grid analyzer-grid">
+                <label><span data-i18n="lblEvalMs">Eval ms</span> <input id="cfg-eval-ms" data-persist type="number" min="100" max="10000" step="100" value="500"></label>
+                <label><span data-i18n="lblEvalVisits">Max visits</span> <input id="cfg-eval-visits" data-persist type="number" min="0" max="10000" step="50" value="0" title="0 = time budget only" data-i18n-title="titleEvalVisits"></label>
+              </div>
+            </div>
           </div>
         </details>
+      </div>
+
+      <div class="tab-pane" id="pane-analysis" data-pane="analysis">
+        <section class="card" id="card-analysis">
+          <h2 class="card-h-row">
+            <span data-i18n="cardAnalysis">Live Analysis</span>
+            <span id="eval-busy-dot" class="eval-busy-dot" hidden aria-label="Analyzing"></span>
+            <span class="spacer"></span>
+            <button id="btn-analyze-now" class="mini-btn" type="button" data-i18n="btnAnalyzeNow">Analyze</button>
+          </h2>
+          <div class="card-body">
+            <div class="eval-summary-row">
+              <div class="eval-kpi">
+                <div class="eval-kpi-label" data-i18n="lblEvalWinrate">Black Winrate</div>
+                <div class="eval-kpi-val" id="an-winrate">--</div>
+              </div>
+              <div class="eval-kpi">
+                <div class="eval-kpi-label" data-i18n="lblEvalLead">Score Lead</div>
+                <div class="eval-kpi-val" id="an-lead">--</div>
+              </div>
+              <div class="eval-kpi">
+                <div class="eval-kpi-label" data-i18n="lblEvalVisitsVal">Visits</div>
+                <div class="eval-kpi-val" id="an-visits">--</div>
+              </div>
+            </div>
+
+            <div class="chart-toolbar">
+              <div class="seg-group" role="group">
+                <button class="seg-btn active" type="button" data-chart-mode="winrate" data-i18n="chartWinrate">Winrate</button>
+                <button class="seg-btn" type="button" data-chart-mode="score" data-i18n="chartScore">Score</button>
+                <button class="seg-btn" type="button" data-chart-mode="both" data-i18n="chartBoth">Both</button>
+              </div>
+              <span class="hint chart-hint" id="an-tt-estimate"></span>
+            </div>
+
+            <div id="eval-chart" class="eval-chart"></div>
+
+            <div class="an-section" id="an-cands-section">
+              <div class="an-section-head">
+                <span data-i18n="lblTopMoves">Top AI Moves</span>
+                <span class="hint" data-i18n="hintHoverPv">hover on board for PV</span>
+              </div>
+              <div id="an-cands-list" class="an-list"></div>
+            </div>
+
+            <div class="an-section" id="an-blunders-section">
+              <div class="an-section-head">
+                <span data-i18n="lblBlunders">Key Turning Points</span>
+                <span id="an-blunder-count" class="tab-pill" hidden>0</span>
+              </div>
+              <div id="an-blunders-list" class="an-list"></div>
+            </div>
+          </div>
+        </section>
       </div>
 
       <div class="tab-pane" id="pane-results" data-pane="results">

@@ -15,10 +15,27 @@ export function recordToSgf(rec) {
   if (date) head += `DT[${date}]`;
   head += `GN[Game ${rec.index + 1}]GC[${escape(`ko rule: ${rec.koRule}; ${rec.reason}`)}]`;
 
-  const nodes = rec.moves.map(([c, v, ms]) => {
+  const evalMap = new Map();
+  if (Array.isArray(rec.analysis)) {
+    for (const item of rec.analysis) {
+      if (item && Number.isInteger(item.moveNo) && typeof item.winrate === "number") {
+        evalMap.set(item.moveNo, item);
+      }
+    }
+  }
+
+  const nodes = rec.moves.map(([c, v, ms], idx) => {
     const color = colorFromLetter(c) === BLACK ? "B" : "W";
     const coord = v.toLowerCase() === "pass" ? "" : board.toSgf(board.fromGtp(v));
-    return `;${color}[${coord}]C[${(ms / 1000).toFixed(1)}s]`;
+    const parts = [`${(ms / 1000).toFixed(1)}s`];
+    const ev = evalMap.get(idx + 1);
+    if (ev) {
+      parts.push(`B ${(ev.winrate * 100).toFixed(1)}%`);
+      if (typeof ev.scoreLead === "number") {
+        parts.push(ev.scoreLead >= 0 ? `B+${ev.scoreLead.toFixed(1)}` : `W+${(-ev.scoreLead).toFixed(1)}`);
+      }
+    }
+    return `;${color}[${coord}]C[${escape(parts.join(" | "))}]`;
   });
 
   const lines = [];

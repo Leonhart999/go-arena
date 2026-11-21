@@ -53,6 +53,130 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
+def parse_analyze_line(line: str, color: str, proto: str, size: int) -> dict | None:
+    """Parse one `info ...` line from kata-analyze or lz-analyze.
+
+    All returned winrate / scoreLead / ownership values are normalized to
+    Black's perspective:
+      - winrate in [0, 1] (Black win probability)
+      - scoreLead in points (> 0 means Black leads, None if unavailable)
+      - ownership list of size*size floats in [-1, 1] (+1 Black, -1 White)
+    """
+    if not line.startswith("info "):
+        return None
+    is_black = str(color).upper() == "B"
+    ownership: list[float] | None = None
+    body = line
+    own_marker = " ownership "
+    own_idx = body.find(own_marker)
+    if own_idx >= 0:
+        own_tokens = body[own_idx + len(own_marker) :].split()
+        body = body[:own_idx]
+        expected = size * size
+        if len(own_tokens) >= expected:
+            try:
+                raw_own = [float(x) for x in own_tokens[:expected]]
+                sign = 1.0 if is_black else -1.0
+                ownership = [round(v * sign, 3) for v in raw_own]
+            except ValueError:
+                ownership = None
+
+    moves: list[dict] = []
+    # Split on "info " boundaries (each candidate starts with "info move ...").
+    chunks = body.split("info ")
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        tokens = chunk.split()
+        i = 0
+        entry: dict = {}
+        while i < len(tokens):
+            key = tokens[i]
+            if key == "pv":
+                entry["pv"] = tokens[i + 1 :]
+                break
+            if i + 1 >= len(tokens):
+                break
+            val = tokens[i + 1]
+            if key == "move":
+                entry["move"] = val
+            elif key == "visits":
+                try:
+                    entry["visits"] = int(val)
+                except ValueError:
+                    pass
+            elif key == "order":
+                try:
+                    entry["order"] = int(val)
+                except ValueError:
+                    pass
+            elif key == "winrate":
+                try:
+                    wr = float(val)
+                    # lz-analyze reports integer 0..10000; kata-analyze reports 0..1.
+                    if proto == "lz" or wr > 1.0:
+                        wr = wr / 10000.0
+                    wr = max(0.0, min(1.0, wr))
+                    entry["winrate"] = round(wr if is_black else 1.0 - wr, 4)
+                except ValueError:
+                    pass
+            elif key == "scoreLead":
+                try:
+                    sl = float(val)
+                    entry["scoreLead"] = round(sl if is_black else -sl, 2)
+                except ValueError:
+                    pass
+            elif key == "scoreMean" and "scoreLead" not in entry:
+                try:
+                    sm = float(val)
+                    entry["scoreMean"] = round(sm if is_black else -sm, 2)
+                except ValueError:
+                    pass
+            elif key == "prior":
+                try:
+                    entry["prior"] = round(float(val), 4)
+                except ValueError:
+                    pass
+            i += 2
+        if "move" in entry and "winrate" in entry:
+            sl = entry.get("scoreLead", entry.get("scoreMean"))
+            moves.append(
+                {
+                    "move": entry["move"],
+                    "visits": entry.get("visits", 0),
+                    "order": entry.get("order", len(moves)),
+                    "winrate": entry["winrate"],
+                    "scoreLead": sl,
+                    "prior": entry.get("prior"),
+                    "pv": entry.get("pv", [])[:16],
+                }
+            )
+
+    if not moves:
+        return None
+
+    moves.sort(key=lambda m: (m.get("order", 999), -m.get("visits", 0)))
+    best = moves[0]
+    total_visits = sum(m.get("visits", 0) for m in moves)
+    return {
+        "winrate": best["winrate"],
+        "scoreLead": best["scoreLead"],
+        "visits": total_visits,
+        "ownership": ownership,
+        "moves": [
+            {
+                "move": m["move"],
+                "visits": m["visits"],
+                "winrate": m["winrate"],
+                "scoreLead": m["scoreLead"],
+                "pv": m["pv"],
+            }
+            for m in moves
+        ],
+    }
+
+
 class GtpProcess:
     """Manages one GTP child process with incremental board synchronization."""
 
@@ -61,6 +185,7 @@ class GtpProcess:
         self.cwd = cwd
         self.quiet = quiet
         self._lock = threading.Lock()
+        self._cancel_analyze = threading.Event()
         self.proc: subprocess.Popen | None = None
         self._lines: queue.Queue[str | None] = queue.Queue()
         self.info: dict = {}
@@ -99,7 +224,21 @@ class GtpProcess:
         version = self._try_send("version", timeout=30.0) or ""
         listing = self._try_send("list_commands", timeout=30.0) or ""
         self.commands = {c.strip() for c in listing.splitlines() if c.strip()}
-        self.info = {"name": name, "version": version, "commands": sorted(self.commands)}
+        analyze_proto = (
+            "kata"
+            if "kata-analyze" in self.commands
+            else "lz"
+            if "lz-analyze" in self.commands
+            else None
+        )
+        self.info = {
+            "name": name,
+            "version": version,
+            "commands": sorted(self.commands),
+            "canScore": "final_score" in self.commands,
+            "canAnalyze": analyze_proto is not None,
+            "analyzeProto": analyze_proto,
+        }
 
     @staticmethod
     def _pump_stdout(proc: subprocess.Popen, out_q: queue.Queue) -> None:
@@ -196,6 +335,7 @@ class GtpProcess:
             self.cur_time = time_per_move
 
     def genmove(self, size: int, komi: float, color: str, moves: list[list[str]], time_per_move: float) -> str:
+        self._cancel_analyze.set()
         with self._lock:
             if self.proc is None or self.proc.poll() is not None:
                 self._spawn()
@@ -212,11 +352,151 @@ class GtpProcess:
             return mv
 
     def final_score(self, size: int, komi: float, moves: list[list[str]]) -> str:
+        self._cancel_analyze.set()
         with self._lock:
             if self.proc is None or self.proc.poll() is not None:
                 self._spawn()
             self._sync_state(size, komi, moves, 0.0)
             return self._send("final_score", timeout=60.0)
+
+    def cancel_analyze(self) -> None:
+        self._cancel_analyze.set()
+
+    def analyze(
+        self,
+        size: int,
+        komi: float,
+        color: str,
+        moves: list[list[str]],
+        max_time_ms: int = 500,
+        max_visits: int = 0,
+        max_moves: int = 5,
+        include_ownership: bool = True,
+    ) -> dict:
+        self._cancel_analyze.set()
+        with self._lock:
+            self._cancel_analyze.clear()
+            if self.proc is None or self.proc.poll() is not None:
+                self._spawn()
+
+            proto = self.info.get("analyzeProto")
+            if not proto:
+                raise GtpError("engine does not support kata-analyze or lz-analyze")
+
+            self._sync_state(size, komi, moves, 0.0)
+            proc = self.proc
+            if proc is None or proc.poll() is not None:
+                raise GtpError("engine exited before analyze")
+            assert proc.stdin is not None
+
+            c = str(color).upper()
+            interval_cs = max(5, min(20, max_time_ms // 40)) if max_time_ms > 0 else 10
+            max_m = max(1, min(10, int(max_moves or 5)))
+            if proto == "kata":
+                cmd = f"kata-analyze {c} {interval_cs} maxmoves {max_m}"
+                if include_ownership:
+                    cmd += " ownership true"
+            else:
+                cmd = f"lz-analyze {c} {interval_cs}"
+
+            try:
+                proc.stdin.write((cmd + "\n").encode("utf-8"))
+                proc.stdin.flush()
+            except OSError as e:
+                raise GtpError(f"cannot write to engine: {e}")
+
+            # Wait for leading '=' or '?' status line
+            status = None
+            err_body: list[str] = []
+            start_deadline = time.monotonic() + 15.0
+            while status is None:
+                rem = max(0.0, start_deadline - time.monotonic())
+                try:
+                    line = self._lines.get(timeout=rem)
+                except queue.Empty:
+                    raise GtpError(f"timeout starting {cmd!r}")
+                if line is None:
+                    raise GtpError(f"engine closed stdout during {cmd!r}")
+                if line.startswith(("=", "?")):
+                    status = line[0]
+                    rest = line[1:].lstrip("0123456789").strip()
+                    if rest:
+                        err_body.append(rest)
+            if status == "?":
+                # Drain until blank line
+                while True:
+                    try:
+                        line = self._lines.get(timeout=2.0)
+                    except queue.Empty:
+                        break
+                    if line is None or line.strip() == "":
+                        break
+                    err_body.append(line)
+                raise GtpError(f"{cmd!r} failed: {' '.join(err_body).strip()}")
+
+            budget_s = max(0.08, min(30.0, (max_time_ms or 500) / 1000.0))
+            deadline = time.monotonic() + budget_s
+            target_visits = max(0, int(max_visits or 0))
+            latest: dict | None = None
+            stopped_naturally = False
+
+            while True:
+                if self._cancel_analyze.is_set():
+                    break
+                now = time.monotonic()
+                if now >= deadline and (latest is not None or now >= deadline + 1.5):
+                    break
+                wait_s = min(0.05, max(0.01, (deadline + (0.0 if latest is not None else 1.5)) - now))
+                try:
+                    line = self._lines.get(timeout=wait_s)
+                except queue.Empty:
+                    continue
+                if line is None:
+                    raise GtpError("engine closed stdout during analyze")
+                if line.strip() == "":
+                    stopped_naturally = True
+                    break
+                if line.startswith("info "):
+                    parsed = parse_analyze_line(line, c, proto, size)
+                    if parsed:
+                        latest = parsed
+                        if target_visits > 0 and parsed["visits"] >= target_visits:
+                            break
+
+            if not stopped_naturally:
+                # Terminate streaming analysis cleanly with a blank line (GTP spec for *-analyze)
+                try:
+                    proc.stdin.write(b"\n")
+                    proc.stdin.flush()
+                except OSError:
+                    pass
+                drain_deadline = time.monotonic() + 5.0
+                while time.monotonic() < drain_deadline:
+                    try:
+                        line = self._lines.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if line is None or line.strip() == "":
+                        break
+                    if line.startswith("info "):
+                        parsed = parse_analyze_line(line, c, proto, size)
+                        if parsed:
+                            latest = parsed
+
+            if latest is None:
+                return {
+                    "winrate": None,
+                    "scoreLead": None,
+                    "visits": 0,
+                    "ownership": None,
+                    "moves": [],
+                    "proto": proto,
+                    "cancelled": self._cancel_analyze.is_set(),
+                }
+            latest["proto"] = proto
+            latest["cancelled"] = self._cancel_analyze.is_set()
+            latest["moves"] = latest["moves"][:max_m]
+            return latest
 
     def kill(self) -> None:
         proc = self.proc
@@ -395,6 +675,22 @@ async def handle_client(
                     list(msg.get("moves", [])),
                 )
                 await send_json({"id": req_id, "ok": True, "score": score})
+            elif op == "analyze":
+                result = await asyncio.to_thread(
+                    engine.analyze,
+                    int(msg["size"]),
+                    float(msg["komi"]),
+                    str(msg["color"]),
+                    list(msg.get("moves", [])),
+                    int(msg.get("maxTimeMs", 500)),
+                    int(msg.get("maxVisits", 0)),
+                    int(msg.get("maxMoves", 5)),
+                    bool(msg.get("includeOwnership", True)),
+                )
+                await send_json({"id": req_id, "ok": True, **result})
+            elif op == "cancel_analyze":
+                engine.cancel_analyze()
+                await send_json({"id": req_id, "ok": True})
             elif op == "restart":
                 await asyncio.to_thread(engine.restart)
                 await send_json({"id": req_id, "ok": True})

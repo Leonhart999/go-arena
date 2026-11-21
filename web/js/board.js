@@ -25,11 +25,13 @@ function starPoints(size) {
 }
 
 export class BoardView {
-  constructor(container, { onClick } = {}) {
+  constructor(container, { onClick, onHoverCandidate } = {}) {
     this.onClick = onClick;
+    this.onHoverCandidate = onHoverCandidate || null;
     this.size = 0;
     this.interactiveColor = null; // BLACK/WHITE when a local human may click
     this.position = null;
+    this.hoveredCandidate = null; // candidate move string when hovering an AI suggestion
     this.svg = el("svg", { class: "goban", role: "img", "aria-label": "Go board" });
     container.appendChild(this.svg);
 
@@ -64,14 +66,23 @@ export class BoardView {
     this.shadowLayer = el("g", {}, this.svg);
     this.stoneLayer = el("g", {}, this.svg);
     this.markLayer = el("g", {}, this.svg);
+    this.candidateLayer = el("g", {}, this.svg);
+    this.pvLayer = el("g", {}, this.svg);
     this.ghost = el("circle", { r: 0.47, class: "ghost", visibility: "hidden" }, this.svg);
 
     this.svg.addEventListener("click", (e) => {
       const p = this.pointAt(e);
       if (p !== null && this.interactiveColor && this.onClick) this.onClick(p);
     });
-    this.svg.addEventListener("mousemove", (e) => this.updateGhost(this.pointAt(e)));
-    this.svg.addEventListener("mouseleave", () => this.updateGhost(null));
+    this.svg.addEventListener("mousemove", (e) => {
+      const p = this.pointAt(e);
+      this.updateGhost(p);
+      this._updateCandidateHover(p);
+    });
+    this.svg.addEventListener("mouseleave", () => {
+      this.updateGhost(null);
+      this._updateCandidateHover(null);
+    });
   }
 
   pointAt(event) {
@@ -146,14 +157,109 @@ export class BoardView {
     }
   }
 
-  // position: { size, stones: Uint8Array, lastPoint, owner?: Uint8Array, moveNumbers?: Map<number, number> }
+  _gtpToPoint(vertex) {
+    const v = String(vertex ?? "").trim().toUpperCase();
+    if (!v || v === "PASS" || v === "RESIGN") return -1;
+    const x = GTP_COLS.indexOf(v[0]);
+    const row = Number(v.slice(1));
+    if (x < 0 || !Number.isInteger(row)) return -1;
+    const y = this.size - row;
+    if (x >= this.size || y < 0 || y >= this.size) return -1;
+    return y * this.size + x;
+  }
+
+  _updateCandidateHover(point) {
+    const cands = this.position?.candidates;
+    let found = null;
+    if (point !== null && Array.isArray(cands) && cands.length) {
+      for (const c of cands) {
+        if (this._gtpToPoint(c.move) === point) {
+          found = c;
+          break;
+        }
+      }
+    }
+    const nextMove = found ? found.move : null;
+    if (nextMove !== this.hoveredCandidate) {
+      this.hoveredCandidate = nextMove;
+      this._renderPv(found);
+      if (this.onHoverCandidate) this.onHoverCandidate(found);
+    }
+  }
+
+  _renderPv(candidate) {
+    this.pvLayer.replaceChildren();
+    if (!candidate || !Array.isArray(candidate.pv) || !candidate.pv.length || !this.position) return;
+    const { size, stones, toPlay } = this.position;
+    let color = toPlay === WHITE ? WHITE : BLACK;
+    const placed = new Set();
+    const maxLen = Math.min(12, candidate.pv.length);
+    for (let i = 0; i < maxLen; i++) {
+      const p = this._gtpToPoint(candidate.pv[i]);
+      const stepColor = color;
+      color = color === BLACK ? WHITE : BLACK;
+      if (p < 0 || placed.has(p)) continue;
+      if (stones[p] !== EMPTY) continue;
+      placed.add(p);
+      const x = p % size;
+      const y = (p - x) / size;
+      const cx = MARGIN + x;
+      const cy = MARGIN + y;
+      el("circle", {
+        cx,
+        cy,
+        r: 0.455,
+        fill: stepColor === BLACK ? "url(#stone-b)" : "url(#stone-w)",
+        class: stepColor === WHITE ? "pv-stone white" : "pv-stone black",
+      }, this.pvLayer);
+      const num = i + 1;
+      const fz = num >= 10 ? 0.34 : 0.4;
+      el("text", {
+        x: cx,
+        y: cy + 0.02,
+        class: stepColor === BLACK ? "pv-num on-black" : "pv-num on-white",
+        "font-size": `${fz}px`,
+        "text-anchor": "middle",
+        "dominant-baseline": "central",
+      }, this.pvLayer).textContent = String(num);
+    }
+  }
+
+  // position: {
+  //   size, stones: Uint8Array, lastPoint,
+  //   owner?: Uint8Array,                // discrete Tromp-Taylor ownership (1=B, 2=W)
+  //   ownership?: number[],              // continuous AI ownership in [-1, 1] (+1=B, -1=W)
+  //   moveNumbers?: Map<number, number>,
+  //   candidates?: [{move, winrate, scoreLead, visits, pv}],
+  //   toPlay?: BLACK | WHITE,
+  // }
   render(position) {
     this.position = position;
     if (position.size !== this.size) this.drawGrid(position.size);
-    const { size, stones, lastPoint, owner, moveNumbers } = position;
+    const { size, stones, lastPoint, owner, ownership, moveNumbers, candidates, toPlay } = position;
 
     this.ownerLayer.replaceChildren();
-    if (owner) {
+    if (Array.isArray(ownership) && ownership.length === size * size) {
+      for (let p = 0; p < ownership.length; p++) {
+        const v = ownership[p];
+        if (typeof v !== "number" || !Number.isFinite(v)) continue;
+        const mag = Math.min(1, Math.abs(v));
+        if (mag < 0.12) continue;
+        const x = p % size;
+        const y = (p - x) / size;
+        const side = 0.18 + mag * 0.64;
+        const opacity = (0.14 + mag * 0.44).toFixed(2);
+        el("rect", {
+          x: MARGIN + x - side / 2,
+          y: MARGIN + y - side / 2,
+          width: side,
+          height: side,
+          rx: 0.08,
+          class: v > 0 ? "own-heat-b" : "own-heat-w",
+          "fill-opacity": opacity,
+        }, this.ownerLayer);
+      }
+    } else if (owner) {
       for (let p = 0; p < owner.length; p++) {
         if (!owner[p] || stones[p] === owner[p]) continue;
         const x = p % size;
@@ -215,6 +321,60 @@ export class BoardView {
         cx: MARGIN + x, cy: MARGIN + y, r: 0.21,
         class: stones[lastPoint] === BLACK ? "last on-black" : "last on-white",
       }, this.markLayer);
+    }
+
+    // AI recommended candidate bubbles
+    this.candidateLayer.replaceChildren();
+    this.pvLayer.replaceChildren();
+    if (Array.isArray(candidates) && candidates.length) {
+      const sideIsBlack = toPlay !== WHITE;
+      candidates.slice(0, 5).forEach((cand, idx) => {
+        const p = this._gtpToPoint(cand.move);
+        if (p < 0 || stones[p] !== EMPTY) return;
+        const x = p % size;
+        const y = (p - x) / size;
+        const cx = MARGIN + x;
+        const cy = MARGIN + y;
+        const tier = idx === 0 ? "best" : idx === 1 ? "good" : "alt";
+        el("circle", {
+          cx,
+          cy,
+          r: idx === 0 ? 0.45 : 0.41,
+          class: `cand-ring ${tier}`,
+        }, this.candidateLayer);
+        // Show mover's winrate % on top line and scoreLead or visits on bottom line
+        const moverWr = sideIsBlack ? cand.winrate : 1 - cand.winrate;
+        const wrText = `${(moverWr * 100).toFixed(0)}%`;
+        el("text", {
+          x: cx,
+          y: cy - (typeof cand.scoreLead === "number" ? 0.11 : 0.01),
+          class: `cand-wr ${tier}`,
+          "font-size": "0.27px",
+          "text-anchor": "middle",
+          "dominant-baseline": "central",
+        }, this.candidateLayer).textContent = wrText;
+
+        if (typeof cand.scoreLead === "number" && Number.isFinite(cand.scoreLead)) {
+          const moverLead = sideIsBlack ? cand.scoreLead : -cand.scoreLead;
+          const sign = moverLead > 0.05 ? "+" : "";
+          el("text", {
+            x: cx,
+            y: cy + 0.16,
+            class: `cand-sub ${tier}`,
+            "font-size": "0.21px",
+            "text-anchor": "middle",
+            "dominant-baseline": "central",
+          }, this.candidateLayer).textContent = `${sign}${moverLead.toFixed(1)}`;
+        }
+      });
+      // Re-render hovered PV if cursor is still on a valid candidate
+      if (this.hoveredCandidate) {
+        const still = candidates.find((c) => c.move === this.hoveredCandidate);
+        if (still) this._renderPv(still);
+        else this.hoveredCandidate = null;
+      }
+    } else {
+      this.hoveredCandidate = null;
     }
   }
 }
