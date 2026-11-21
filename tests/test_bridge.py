@@ -237,6 +237,45 @@ class BridgeTests(unittest.TestCase):
             engine.kill()
             th.join(timeout=5.0)
 
+    def test_byoyomi_and_rules_sync_sent_to_engine(self):
+        mock_code = (
+            "import sys\n"
+            "seen = []\n"
+            "for raw in sys.stdin:\n"
+            "    s = raw.strip()\n"
+            "    if not s: continue\n"
+            "    p = s.split()\n"
+            "    cmd = p[0].lower()\n"
+            "    seen.append(s)\n"
+            "    if cmd == 'name': out = '= mock_clk\\n\\n'\n"
+            "    elif cmd == 'version': out = '= 1.0\\n\\n'\n"
+            "    elif cmd == 'list_commands': out = '= name\\nversion\\nboardsize\\nclear_board\\nkomi\\nplay\\ngenmove\\nkgs-time_settings\\ntime_left\\nkata-set-rules\\n\\n'\n"
+            "    elif cmd == 'genmove':\n"
+            "        has_rules = any(x == 'kata-set-rules japanese' for x in seen)\n"
+            "        has_kgs = any(x == 'kgs-time_settings byoyomi 300 30 3' for x in seen)\n"
+            "        has_tl = any(x == 'time_left B 30 3' for x in seen)\n"
+            "        out = f'= {\"B2\" if (has_rules and has_kgs and has_tl) else \"pass\"}\\n\\n'\n"
+            "    elif cmd == 'quit':\n"
+            "        sys.stdout.write('=\\n\\n'); sys.stdout.flush(); break\n"
+            "    else: out = '=\\n\\n'\n"
+            "    sys.stdout.write(out); sys.stdout.flush()\n"
+        )
+        engine = gtp_bridge.GtpProcess([sys.executable, "-u", "-c", mock_code], quiet=True)
+        try:
+            engine.ensure_running()
+            mv = engine.genmove(
+                3,
+                6.5,
+                "B",
+                [],
+                0.0,
+                clock={"mode": "byoyomi", "mainTime": 300, "byoTime": 30, "byoPeriods": 3, "timeLeftSec": 30, "periodsLeft": 3},
+                rules="japanese",
+            )
+            self.assertEqual(mv, "B2")
+        finally:
+            engine.kill()
+
     def test_origin_filter(self):
         patterns = gtp_bridge.DEFAULT_ORIGINS
         self.assertTrue(gtp_bridge.origin_allowed("https://leonhart999.github.io", patterns))

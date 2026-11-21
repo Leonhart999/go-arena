@@ -128,6 +128,21 @@ export class SoundEffects {
     osc.stop(now + 0.14);
   }
 
+  playByoyomiTick(urgent = false) {
+    const ctx = this._ensureCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(urgent ? 980 : 720, now);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(urgent ? 0.14 : 0.08, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.1);
+  }
+
   playGameEnd() {
     const ctx = this._ensureCtx();
     if (!ctx) return;

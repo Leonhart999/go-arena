@@ -231,8 +231,10 @@ export function recordToSgf(rec) {
   const whiteSeat = rec.blackSeat === "A" ? "B" : "A";
   const white = rec.labels?.[whiteSeat] ?? whiteSeat;
   const date = (rec.startedAt ?? "").slice(0, 10);
+  const ruleTag = rec.rulePreset === "japanese" ? "Japanese" : "Chinese";
   let head =
-    `(;GM[1]FF[4]CA[UTF-8]AP[go-arena]SZ[${rec.size}]KM[${rec.komi}]RU[Chinese]` +
+    `(;GM[1]FF[4]CA[UTF-8]AP[go-arena]SZ[${rec.size}]KM[${rec.komi}]RU[${ruleTag}]` +
+    (rec.handicap >= 2 ? `HA[${rec.handicap}]` : "") +
     `PB[${escape(black)}]PW[${escape(white)}]RE[${escape(rec.result)}]`;
   if (date) head += `DT[${date}]`;
   head += `GN[Game ${rec.index + 1}]GC[${escape(`ko rule: ${rec.koRule}; ${rec.reason}`)}]`;

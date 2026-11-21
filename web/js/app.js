@@ -1,6 +1,6 @@
 // go-arena page controller: wires players, the room, the match runner and the UI.
 import { BoardView } from "./board.js";
-import { GameState, Board, colorFromLetter, colorLetter, formatScore } from "./go.js";
+import { GameState, Board, RULE_PRESETS, colorFromLetter, colorLetter, formatScore } from "./go.js";
 import { BridgeClient, EnginePlayer, HumanPlayer, RemotePlayer, Cancelled, engineLabel } from "./players.js";
 import { MatchRunner } from "./match.js";
 import { HostRoom, GuestRoom, normalizeCode, parseIceServers, encodeIceParam, decodeIceParam } from "./net.js";
@@ -10,6 +10,8 @@ import { LANG_KEY, applyDomTranslations, detectLang, translate } from "./i18n.js
 import { AnalysisManager, detectBlunders, formatScoreLead, stripForRecord } from "./analysis.js";
 import { AnalysisChart } from "./chart.js";
 import { SoundEffects } from "./audio.js";
+import { formatClockMs, projectClockSnapshot } from "./clock.js";
+import { BUILTIN_OPENINGS, loadBridgePresets, parseOpeningBook, saveBridgePresets } from "./presets.js";
 
 const $ = (id) => document.getElementById(id);
 const STORE = "go-arena.";
@@ -54,6 +56,10 @@ const app = {
   view: null, // guest: latest state from the host
   viewAt: 0,
   lastSoundMoveKey: "",
+  lastByoBeepKey: "",
+  bridgePresets: [],
+  chat: [], // [{ id, sender, text, ts, system? }]
+  chatUnread: 0,
   review: null, // { rec, moveNo, tryMode, variation: [[c, v, ms]], varEval: entry|null, playTimer }
   guestReq: null, // guest: { req, player } being answered
   mySeat: null,
@@ -124,20 +130,46 @@ function loadRecords() {
   }
 }
 
+function resolveOpeningBook(size) {
+  const mode = $("cfg-book-mode")?.value || "none";
+  if (mode === "none") return { book: null, error: null };
+  if (mode === "builtin") {
+    return { book: BUILTIN_OPENINGS[size] || null, error: null };
+  }
+  const text = $("cfg-book-text")?.value || "";
+  try {
+    const parsed = parseOpeningBook(text, size, 16);
+    return { book: parsed.length ? parsed : null, error: null };
+  } catch (e) {
+    return { book: null, error: e.message };
+  }
+}
+
 function readConfig() {
   const num = (id, def, min, max) => {
     const v = Number($(id).value);
     return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def;
   };
+  const size = Number($("cfg-size").value) || 19;
+  const { book } = resolveOpeningBook(size);
+  const clockMode = $("cfg-clock-mode")?.value === "byoyomi" ? "byoyomi" : "fixed";
   return {
-    size: Number($("cfg-size").value) || 19,
+    size,
     komi: num("cfg-komi", 7.5, -150, 150),
     koRule: $("cfg-ko").value,
+    rulePreset: $("cfg-rules")?.value === "japanese" ? "japanese" : "chinese",
+    handicap: Math.round(num("cfg-handicap", 0, 0, 9)),
     games: Math.round(num("cfg-games", 10, 1, 1000)),
     alternate: $("cfg-alternate").checked,
+    clockMode,
     timePerMove: num("cfg-time", 10, 0, 3600),
+    mainTimeSec: Math.round(num("cfg-main-min", 5, 0, 180) * 60),
+    byoyomiSec: Math.round(num("cfg-byo-sec", 30, 5, 300)),
+    byoyomiPeriods: Math.round(num("cfg-byo-periods", 3, 1, 20)),
     maxMoves: Math.round(num("cfg-maxmoves", 0, 0, 5000)),
     moveDelay: Math.round(num("cfg-delay", 0, 0, 60000)),
+    openingBook: book,
+    openingBookSwap: !!$("cfg-book-swap")?.checked,
   };
 }
 
@@ -658,6 +690,8 @@ function startMatch(override = null) {
         koRule: override.koRule ?? baseCfg.koRule,
         games: override.games ?? baseCfg.games,
         initialMoves: override.initialMoves ?? null,
+        startPlayed: override.startPlayed ?? 0,
+        startRecordIndex: override.startRecordIndex ?? 0,
       }
     : baseCfg;
 
@@ -720,6 +754,131 @@ function startMatch(override = null) {
     console.error(e);
   });
   update();
+}
+
+function continueRemainingMatch() {
+  if (app.runner?.running || app.role !== "host") return;
+  const done = app.records.filter((r) => !r.void && !r.imported).length;
+  const target = readConfig().games;
+  if (done <= 0 || done >= target) return;
+  log(t("logContinueMatch", { done, total: target }));
+  startMatch({
+    keepRecords: true,
+    startPlayed: done,
+    startRecordIndex: app.records.length,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Bridge presets & Room chat
+// ---------------------------------------------------------------------------
+function renderBridgePresets() {
+  for (const which of ["my", "b"]) {
+    const sel = $(`${which}-preset`);
+    if (!sel) continue;
+    const prev = sel.value;
+    sel.replaceChildren();
+    const def = document.createElement("option");
+    def.value = "";
+    def.textContent = t("presetPlaceholder");
+    sel.appendChild(def);
+    for (const p of app.bridgePresets) {
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = `${p.name} (${p.url})`;
+      sel.appendChild(opt);
+    }
+    if (prev && app.bridgePresets.some((p) => p.name === prev)) sel.value = prev;
+  }
+}
+
+function saveBridgePreset(which) {
+  const url = $(`${which}-url`)?.value.trim();
+  if (!url) return;
+  const name = (prompt(t("promptPresetName")) || "").trim();
+  if (!name) return;
+  const idx = app.bridgePresets.findIndex((p) => p.name === name);
+  if (idx >= 0) app.bridgePresets[idx] = { name, url };
+  else app.bridgePresets.push({ name, url });
+  saveBridgePresets(app.bridgePresets);
+  renderBridgePresets();
+  const sel = $(`${which}-preset`);
+  if (sel) sel.value = name;
+  log(t("logPresetSaved", { name }));
+}
+
+function deleteBridgePreset(which) {
+  const sel = $(`${which}-preset`);
+  const name = sel?.value;
+  if (!name) return;
+  app.bridgePresets = app.bridgePresets.filter((p) => p.name !== name);
+  saveBridgePresets(app.bridgePresets);
+  renderBridgePresets();
+  log(t("logPresetDeleted", { name }));
+}
+
+function appendChatMessage(entry, { countUnread = true } = {}) {
+  app.chat.push(entry);
+  if (app.chat.length > 200) app.chat.shift();
+  if (countUnread && app.tab !== "log") {
+    app.chatUnread++;
+  }
+  renderChat();
+}
+
+function renderChat() {
+  const box = $("chat-messages");
+  const pill = $("tab-chat-unread");
+  if (pill) {
+    pill.textContent = String(app.chatUnread);
+    pill.hidden = app.chatUnread === 0;
+  }
+  const input = $("chat-input");
+  const sendBtn = $("chat-send");
+  const canChat = !!app.room;
+  if (input) input.disabled = !canChat;
+  if (sendBtn) sendBtn.disabled = !canChat;
+
+  if (!box) return;
+  box.replaceChildren();
+  if (!app.chat.length) {
+    const empty = document.createElement("div");
+    empty.className = "chat-empty";
+    empty.textContent = t("chatEmpty");
+    box.appendChild(empty);
+    return;
+  }
+  for (const m of app.chat) {
+    const row = document.createElement("div");
+    row.className = m.system ? "chat-msg system" : "chat-msg";
+    const head = document.createElement("span");
+    head.className = "chat-meta";
+    const time = new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    head.textContent = `${time} ${m.sender}`;
+    const body = document.createElement("span");
+    body.className = "chat-text";
+    body.textContent = m.text;
+    row.append(head, body);
+    box.appendChild(row);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function sendChatMessage(rawText) {
+  const text = String(rawText ?? "").trim().slice(0, 240);
+  if (!text || !app.room) return;
+  const entry = {
+    sender: myName(),
+    text,
+    ts: Date.now(),
+    system: false,
+  };
+  if (app.role === "host") {
+    appendChatMessage(entry, { countUnread: false });
+    broadcast({ t: "chat", ...entry });
+  } else {
+    app.room.send({ t: "chat", text });
+  }
 }
 
 function hostView({ includeEval = false, stripCandidates = false } = {}) {
@@ -868,6 +1027,14 @@ function onHostMessage(conn, msg) {
     case "move":
       if (app.remote?.conn === conn) app.remote.player.handleMove(msg);
       break;
+    case "chat": {
+      const text = String(msg.text ?? "").trim().slice(0, 240);
+      if (!text) break;
+      const entry = { sender: peer.label || "guest", text, ts: Date.now(), system: false };
+      appendChatMessage(entry, { countUnread: true });
+      broadcast({ t: "chat", ...entry });
+      break;
+    }
     default:
       break;
   }
@@ -992,6 +1159,16 @@ function onGuestMessage(msg) {
     case "ping":
       app.room?.send({ t: "pong" });
       break;
+    case "chat": {
+      const text = String(msg.text ?? "").trim().slice(0, 240);
+      if (!text) break;
+      const fromMe = msg.sender === myName() || msg.sender === myLabel();
+      appendChatMessage(
+        { sender: String(msg.sender || "peer"), text, ts: Number(msg.ts) || Date.now(), system: !!msg.system },
+        { countUnread: !fromMe },
+      );
+      break;
+    }
     default:
       break;
   }
@@ -1348,12 +1525,37 @@ function renderPlayers(v) {
   for (const [color, id] of [["B", "black"], ["W", "white"]]) {
     const parts = [];
     if (cur) parts.push(t("captures", { n: cur.captures?.[color] ?? 0 }));
-    if (thinking?.color === color) {
-      const secs = (thinking.elapsed + Date.now() - app.viewAt) / 1000;
-      parts.push(t("thinking", { s: secs.toFixed(1) }));
+    const isThinking = thinking?.color === color;
+    const elapsedMs = isThinking ? Math.max(0, thinking.elapsed + Date.now() - app.viewAt) : 0;
+    if (isThinking && !cur?.clock) {
+      parts.push(t("thinking", { s: (elapsedMs / 1000).toFixed(1) }));
     }
     $(`${id}-meta`).textContent = parts.join(" · ");
-    $(`pl-${id}`).classList.toggle("to-move", thinking?.color === color);
+    $(`pl-${id}`).classList.toggle("to-move", isThinking);
+
+    // Byo-yomi clock badge
+    const clkNode = $(`${id}-clock`);
+    if (clkNode) {
+      const proj = cur?.clock ? projectClockSnapshot(cur.clock, color, elapsedMs) : null;
+      clkNode.hidden = !proj;
+      if (proj) {
+        if (proj.inByo) {
+          const secLeft = Math.max(0, Math.ceil(proj.curPeriodMs / 1000));
+          clkNode.textContent = t("clockByoFmt", { s: secLeft, p: proj.periods });
+          if (isThinking && secLeft > 0 && secLeft <= 5 && !app.review) {
+            const beepKey = `${cur.index}:${cur.moves.length}:${color}:${proj.periods}:${secLeft}`;
+            if (beepKey !== app.lastByoBeepKey) {
+              app.lastByoBeepKey = beepKey;
+              app.sound.playByoyomiTick(secLeft <= 3);
+            }
+          }
+        } else {
+          clkNode.textContent = formatClockMs(proj.mainMs);
+        }
+        clkNode.classList.toggle("in-byo", proj.inByo);
+        clkNode.classList.toggle("low", proj.low && isThinking);
+      }
+    }
   }
 }
 
@@ -1398,11 +1600,44 @@ function renderControls(v) {
   document.body.classList.toggle("guest", !host);
   document.body.classList.toggle("reviewing", !!app.review);
   $("m-start").disabled = !host || running;
+  const contBtn = $("m-continue");
+  if (contBtn) {
+    const doneCount = app.records.filter((r) => !r.void && !r.imported).length;
+    const targetGames = Math.max(1, Math.round(Number($("cfg-games")?.value) || 10));
+    const canCont = host && !running && doneCount > 0 && doneCount < targetGames;
+    contBtn.hidden = !canCont;
+    contBtn.disabled = !canCont;
+  }
   $("m-pause").disabled = !running || app.runner.paused;
   $("m-resume").disabled = !running || !app.runner.paused;
   $("m-stop").disabled = !running;
-  for (const id of ["cfg-size", "cfg-komi", "cfg-ko", "cfg-games", "cfg-time", "cfg-maxmoves", "cfg-alternate", "b-kind"]) {
-    $(id).disabled = running;
+  for (const id of [
+    "cfg-rules", "cfg-handicap", "cfg-size", "cfg-komi", "cfg-ko", "cfg-games",
+    "cfg-clock-mode", "cfg-time", "cfg-main-min", "cfg-byo-sec", "cfg-byo-periods",
+    "cfg-maxmoves", "cfg-alternate", "cfg-book-mode", "cfg-book-swap", "b-kind",
+  ]) {
+    const node = $(id);
+    if (node) node.disabled = running;
+  }
+  const byoMode = $("cfg-clock-mode")?.value === "byoyomi";
+  $("wrap-fixed-time").hidden = byoMode;
+  $("wrap-main-time").hidden = !byoMode;
+  $("wrap-byo-sec").hidden = !byoMode;
+  $("wrap-byo-periods").hidden = !byoMode;
+
+  const bookMode = $("cfg-book-mode")?.value || "none";
+  const bookBox = $("book-custom-box");
+  if (bookBox) {
+    bookBox.hidden = bookMode !== "custom";
+    if (bookMode === "custom") {
+      const size = Number($("cfg-size").value) || 19;
+      const { book, error } = resolveOpeningBook(size);
+      const st = $("book-status");
+      if (st) {
+        st.textContent = error ? t("bookInvalid", { msg: error }) : t("bookLoadedCount", { n: book ? book.length : 0 });
+        st.className = `hint ${error ? "err" : book?.length ? "ok" : ""}`;
+      }
+    }
   }
   $("res-clear").disabled = running;
   $("my-engine-box").hidden = $("my-kind").value !== "engine";
@@ -1747,6 +1982,7 @@ function update() {
   renderStatus(v);
   renderControls(v);
   renderRoom();
+  renderChat();
   updateReviewLabel();
   if (app.role === "host") broadcastState();
 }
@@ -1786,6 +2022,10 @@ function setTheme(theme) {
 
 function setTab(name) {
   app.tab = name;
+  if (name === "log" && app.chatUnread > 0) {
+    app.chatUnread = 0;
+    renderChat();
+  }
   for (const btn of document.querySelectorAll(".tab[data-tab]")) {
     const active = btn.dataset.tab === name;
     btn.classList.toggle("active", active);
@@ -1806,6 +2046,7 @@ function setLanguage(lang) {
   applyDomTranslations(document, app.lang);
   applyTheme();
   applySoundToggle();
+  renderBridgePresets();
   refreshBridgeHints();
   if (app.runner?.running) {
     app.runner.setSeat("A", myPlayer() || app.runner.seats.A);
@@ -1967,6 +2208,67 @@ function init() {
 
   app.records = loadRecords();
   if (app.records.length) log(t("logRestoredGames", { n: app.records.length }));
+  app.bridgePresets = loadBridgePresets();
+  renderBridgePresets();
+  for (const which of ["my", "b"]) {
+    const sel = $(`${which}-preset`);
+    if (sel) {
+      sel.onchange = () => {
+        const hit = app.bridgePresets.find((p) => p.name === sel.value);
+        if (hit) {
+          $(`${which}-url`).value = hit.url;
+          localStorage.setItem(`${STORE}ui.${which}-url`, hit.url);
+        }
+      };
+    }
+    $(`${which}-preset-save`).onclick = () => saveBridgePreset(which);
+    $(`${which}-preset-del`).onclick = () => deleteBridgePreset(which);
+  }
+
+  $("cfg-rules").onchange = () => {
+    const preset = RULE_PRESETS[$("cfg-rules").value];
+    if (preset) {
+      const h = Number($("cfg-handicap").value) || 0;
+      $("cfg-komi").value = String(h >= 2 ? 0.5 : preset.komi);
+      $("cfg-ko").value = preset.koRule;
+      localStorage.setItem(`${STORE}ui.cfg-komi`, $("cfg-komi").value);
+      localStorage.setItem(`${STORE}ui.cfg-ko`, $("cfg-ko").value);
+    }
+    update();
+  };
+  $("cfg-handicap").onchange = () => {
+    const h = Number($("cfg-handicap").value) || 0;
+    const preset = RULE_PRESETS[$("cfg-rules").value] || RULE_PRESETS.chinese;
+    $("cfg-komi").value = String(h >= 2 ? 0.5 : preset.komi);
+    localStorage.setItem(`${STORE}ui.cfg-komi`, $("cfg-komi").value);
+    update();
+  };
+  $("cfg-clock-mode").onchange = update;
+  $("cfg-book-mode").onchange = update;
+  $("cfg-book-text").oninput = () => renderControls(currentView());
+  $("book-load-file").onclick = () => $("book-file").click();
+  $("book-file").onchange = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const text = await file.text();
+      $("cfg-book-text").value = text;
+      localStorage.setItem(`${STORE}ui.cfg-book-text`, text);
+      const { book } = resolveOpeningBook(Number($("cfg-size").value) || 19);
+      log(t("logBookLoaded", { n: book ? book.length : 0 }));
+      update();
+    } catch (err) {
+      log(t("bookInvalid", { msg: err.message }));
+    }
+  };
+
+  $("chat-form").onsubmit = (e) => {
+    e.preventDefault();
+    const input = $("chat-input");
+    sendChatMessage(input.value);
+    input.value = "";
+  };
 
   $("lang-toggle").onclick = () => setLanguage(app.lang === "zh" ? "en" : "zh");
   $("theme-toggle").onclick = () => setTheme(app.theme === "dark" ? "light" : "dark");
@@ -2036,6 +2338,7 @@ function init() {
   };
 
   $("m-start").onclick = () => startMatch();
+  $("m-continue").onclick = continueRemainingMatch;
   $("m-pause").onclick = () => app.runner?.pause();
   $("m-resume").onclick = () => {
     if (!app.runner) return;

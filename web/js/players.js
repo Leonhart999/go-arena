@@ -139,13 +139,16 @@ export class EnginePlayer {
   }
 
   async requestMove(ctx) {
-    const res = await this.client.request("genmove", {
+    const payload = {
       size: ctx.size,
       komi: ctx.komi,
       color: ctx.color,
       moves: ctx.moves.map(([c, v]) => [c, v]),
       timePerMove: ctx.timePerMove || 0,
-    });
+    };
+    if (ctx.clock) payload.clock = ctx.clock;
+    if (ctx.rules) payload.rules = ctx.rules;
+    const res = await this.client.request("genmove", payload);
     return res.move;
   }
 
@@ -156,11 +159,13 @@ export class EnginePlayer {
   }
 
   async finalScore(ctx) {
-    const res = await this.client.request("final_score", {
+    const payload = {
       size: ctx.size,
       komi: ctx.komi,
       moves: ctx.moves.map(([c, v]) => [c, v]),
-    }, 120000);
+    };
+    if (ctx.rules) payload.rules = ctx.rules;
+    const res = await this.client.request("final_score", payload, 120000);
     return res.score;
   }
 }

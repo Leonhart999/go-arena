@@ -1,7 +1,8 @@
 // Host-side match referee: asks seated players for moves, enforces the
 // rules and the move clock, scores finished games and keeps the records.
-import { BLACK, GameState, IllegalMove, colorFromLetter, colorLetter, formatScore } from "./go.js";
+import { BLACK, WHITE, GameState, IllegalMove, RULE_PRESETS, colorFromLetter, colorLetter, formatScore, handicapVertices } from "./go.js";
 import { Cancelled, Disconnected } from "./players.js";
+import { GameClock } from "./clock.js";
 
 // Extra time allowed on top of the per-move limit for process and network lag.
 export const GRACE_MS = 3000;
@@ -10,13 +11,23 @@ export const DEFAULT_CONFIG = {
   size: 19,
   komi: 7.5,
   koRule: "positional",
+  rulePreset: "chinese", // "chinese" | "japanese"
+  handicap: 0, // 0, 2..9
   games: 10,
   alternate: true,
-  timePerMove: 10, // seconds, 0 = unlimited
+  clockMode: "fixed", // "fixed" | "byoyomi"
+  timePerMove: 10, // seconds, 0 = unlimited (fixed mode)
+  mainTimeSec: 300, // seconds (byoyomi mode)
+  byoyomiSec: 30, // seconds per period (byoyomi mode)
+  byoyomiPeriods: 3, // periods (byoyomi mode)
   maxMoves: 0, // 0 = 2 * size * size
   moveDelay: 0, // ms pause after each move, for watching
+  openingBook: null, // optional array of move sequences [[[color, vertex], ...], ...]
+  openingBookSwap: true, // play each opening twice with swapped colors when alternate=true
   initialMoves: null, // optional [[color, vertex], ...] prefix for game 1 (resume from review)
   startBlackSeat: null, // optional "A" | "B" for game 1
+  startPlayed: 0, // resume match with N decided games already played
+  startRecordIndex: 0, // offset for game index numbering when continuing a match
 };
 
 class Timeout extends Error {}
@@ -149,7 +160,9 @@ export class MatchRunner extends EventTarget {
   async run() {
     this.running = true;
     this.emit("state");
-    let played = 0;
+    let played = Math.max(0, Math.round(this.config.startPlayed || 0));
+    const baseIndex = Math.max(0, Math.round(this.config.startRecordIndex || 0));
+    const book = Array.isArray(this.config.openingBook) && this.config.openingBook.length ? this.config.openingBook : null;
     try {
       while (played < this.config.games && !this.stopped) {
         try {
@@ -161,10 +174,25 @@ export class MatchRunner extends EventTarget {
         if (this.stopped) break;
         const firstBlack = this.config.startBlackSeat === "B" ? "B" : "A";
         const blackSeat = this.config.alternate && played % 2 === 1 ? otherSeat(firstBlack) : firstBlack;
-        const prefix = played === 0 && Array.isArray(this.config.initialMoves) && this.config.initialMoves.length
-          ? this.config.initialMoves
-          : null;
-        const rec = await this.playGame(this.records.length, blackSeat, prefix);
+        let prefix = null;
+        let prefixNote = "";
+        if (this.records.length === 0 && Array.isArray(this.config.initialMoves) && this.config.initialMoves.length) {
+          prefix = this.config.initialMoves;
+          prefixNote = `resumed from move ${prefix.length}`;
+        } else if (book) {
+          const bookIdx = this.config.alternate && this.config.openingBookSwap
+            ? Math.floor(played / 2) % book.length
+            : played % book.length;
+          prefix = book[bookIdx];
+          prefixNote = `opening #${bookIdx + 1} (${prefix.length} moves)`;
+        } else if ((this.config.handicap || 0) >= 2) {
+          const verts = handicapVertices(this.config.size, this.config.handicap);
+          if (verts.length >= 2) {
+            prefix = verts.map((v) => ["B", v, 0]);
+            prefixNote = `handicap ${verts.length}`;
+          }
+        }
+        const rec = await this.playGame(baseIndex + this.records.length, blackSeat, prefix, prefixNote);
         this.records.push(rec);
         this.emit("record", rec);
         if (!rec.void) played++;
@@ -184,10 +212,11 @@ export class MatchRunner extends EventTarget {
     }
   }
 
-  async playGame(index, blackSeat, initialMoves = null) {
+  async playGame(index, blackSeat, initialMoves = null, prefixNote = "") {
     const cfg = this.config;
     const whiteSeat = otherSeat(blackSeat);
     const colorOf = (seat) => (seat === blackSeat ? "B" : "W");
+    const rulePreset = cfg.rulePreset === "japanese" ? "japanese" : "chinese";
     const buildGame = (moveList) => {
       const state = new GameState(cfg.size, cfg.komi, cfg.koRule);
       if (Array.isArray(moveList)) {
@@ -199,17 +228,18 @@ export class MatchRunner extends EventTarget {
     };
     let g = buildGame(initialMoves);
     const initialCount = g.moves.length;
+    const clock = new GameClock(cfg);
     const labels = { A: this.seats.A.label, B: this.seats.B.label };
     const maxMoves = cfg.maxMoves > 0 ? cfg.maxMoves : 2 * cfg.size * cfg.size;
     const startedAt = new Date().toISOString();
     const t0 = performance.now();
     const thinkMs = { A: 0, B: 0 };
     const moveCount = { A: 0, B: 0 };
-    const cur = (this.current = { index, blackSeat, labels, game: g, initialCount, result: null, reason: "", owner: null, thinking: null });
+    const cur = (this.current = { index, blackSeat, labels, game: g, clock, initialCount, rulePreset, result: null, reason: "", owner: null, thinking: null });
     this.voidReason = null;
     this.log(
-      initialCount
-        ? `Game ${index + 1}: ${labels[blackSeat]} (B) vs ${labels[whiteSeat]} (W) (resumed from move ${initialCount})`
+      prefixNote
+        ? `Game ${index + 1}: ${labels[blackSeat]} (B) vs ${labels[whiteSeat]} (W) (${prefixNote})`
         : `Game ${index + 1}: ${labels[blackSeat]} (B) vs ${labels[whiteSeat]} (W)`,
     );
     this.emit("state");
@@ -230,17 +260,21 @@ export class MatchRunner extends EventTarget {
         if (this.voidReason) throw new StopGame(this.voidReason);
 
         const color = g.toPlay;
+        const colorStr = colorLetter(color);
         const seat = color === BLACK ? blackSeat : whiteSeat;
         const player = this.seats[seat];
         const ctx = {
           size: cfg.size,
           komi: cfg.komi,
           koRule: cfg.koRule,
-          color: colorLetter(color),
+          rules: rulePreset,
+          color: colorStr,
           moves: g.moves.map(([c, v]) => [c, v]),
-          timePerMove: cfg.timePerMove,
+          timePerMove: cfg.clockMode === "byoyomi" ? 0 : cfg.timePerMove,
+          clock: clock.gtpState(colorStr),
         };
-        const limitMs = player.kind !== "human" && cfg.timePerMove > 0 ? cfg.timePerMove * 1000 + GRACE_MS : 0;
+        const enforceClock = clock.isByoyomi || player.kind !== "human";
+        const limitMs = enforceClock ? clock.moveLimitMs(colorStr, player.kind === "human" ? 500 : GRACE_MS) : 0;
         cur.thinking = { seat, color: ctx.color, since: Date.now() };
         this.emit("state");
 
@@ -262,14 +296,26 @@ export class MatchRunner extends EventTarget {
           }
           if (e instanceof StopGame) throw e;
           if (e instanceof Disconnected || e instanceof Cancelled) throw new StopGame(e.message);
-          if (e instanceof Timeout) end = lose(seat, "T", `${labels[seat]} exceeded ${cfg.timePerMove}s per move`);
-          else end = lose(seat, "F", `${labels[seat]} failed: ${e.message}`);
+          if (e instanceof Timeout) {
+            const msg = clock.isByoyomi
+              ? `${labels[seat]} ran out of time (byo-yomi)`
+              : `${labels[seat]} exceeded ${cfg.timePerMove}s per move`;
+            end = lose(seat, "T", msg);
+          } else end = lose(seat, "F", `${labels[seat]} failed: ${e.message}`);
           break;
         }
         const ms = performance.now() - start;
         cur.thinking = null;
         thinkMs[seat] += ms;
         moveCount[seat]++;
+
+        if (clock.isByoyomi) {
+          const { flag } = clock.consume(colorStr, ms, { enforce: true });
+          if (flag) {
+            end = lose(seat, "T", `${labels[seat]} ran out of time (byo-yomi)`);
+            break;
+          }
+        }
 
         const mv = String(move ?? "").trim();
         if (mv.toLowerCase() === "resign") {
@@ -298,15 +344,16 @@ export class MatchRunner extends EventTarget {
               this.emit("state");
               continue;
             }
-            const tt = g.trompTaylor(deadSet);
-            this.current.owner = tt.owner;
+            const sc = rulePreset === "japanese" ? g.japaneseScore(deadSet) : g.trompTaylor(deadSet);
+            this.current.owner = sc.owner;
             const deadSuffix = deadSet && deadSet.size ? `, ${deadSet.size} dead marked` : "";
-            end = fromDiff(tt.diff, `both passed; area B ${tt.black} W ${tt.white} komi ${g.komi}${deadSuffix}`);
+            const method = rulePreset === "japanese" ? "Japanese territory" : "area";
+            end = fromDiff(sc.diff, `both passed; ${method} B ${sc.black} W ${sc.white} komi ${g.komi}${deadSuffix}`);
           } else {
-            end = await this.score(g, "both passed", fromDiff);
+            end = await this.score(g, "both passed", fromDiff, rulePreset);
           }
         } else if (g.moves.length >= maxMoves) {
-          end = await this.score(g, `move limit ${maxMoves}`, fromDiff);
+          end = await this.score(g, `move limit ${maxMoves}`, fromDiff, rulePreset);
         } else if (cfg.moveDelay > 0) {
           await this._interruptible(sleep(cfg.moveDelay));
         }
@@ -324,6 +371,8 @@ export class MatchRunner extends EventTarget {
       size: cfg.size,
       komi: cfg.komi,
       koRule: cfg.koRule,
+      rulePreset,
+      handicap: cfg.handicap || 0,
       moves: g.moves,
       result: end.result,
       winnerSeat: end.void ? undefined : end.winnerSeat,
@@ -341,17 +390,24 @@ export class MatchRunner extends EventTarget {
     return rec;
   }
 
-  async score(g, why, fromDiff) {
+  async score(g, why, fromDiff, rulePreset = "chinese") {
     if (this.referee) {
       try {
-        const text = await this._interruptible(this.referee.finalScore({ size: g.size, komi: g.komi, moves: g.moves }));
+        const text = await this._interruptible(
+          this.referee.finalScore({ size: g.size, komi: g.komi, moves: g.moves, rules: rulePreset }),
+        );
         const diff = parseScore(text);
         if (diff !== null) return fromDiff(diff, `${why}; referee engine scored ${text}`);
-        this.log(`Referee returned "${text}", falling back to Tromp-Taylor`);
+        this.log(`Referee returned "${text}", falling back to built-in scoring`);
       } catch (e) {
         if (e instanceof StopGame) throw e;
-        this.log(`Referee failed (${e.message}), falling back to Tromp-Taylor`);
+        this.log(`Referee failed (${e.message}), falling back to built-in scoring`);
       }
+    }
+    if (rulePreset === "japanese") {
+      const jp = g.japaneseScore();
+      this.current.owner = jp.owner;
+      return fromDiff(jp.diff, `${why}; Japanese territory B ${jp.black} W ${jp.white} komi ${g.komi}`);
     }
     const tt = g.trompTaylor();
     this.current.owner = tt.owner;
@@ -373,8 +429,10 @@ export class MatchRunner extends EventTarget {
         size: c.game.size,
         komi: c.game.komi,
         koRule: c.game.koRule,
+        rulePreset: c.rulePreset,
         moves: c.game.moves,
         captures: { B: c.game.board.captures[1], W: c.game.board.captures[2] },
+        clock: c.clock ? c.clock.snapshot() : null,
         result: c.result,
         reason: c.reason,
         owner: c.owner ? Array.from(c.owner) : null,

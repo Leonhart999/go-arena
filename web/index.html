@@ -39,6 +39,7 @@
             <div class="pl-name" id="black-name" data-i18n="blackDefault">Black</div>
             <div class="pl-meta" id="black-meta"></div>
           </div>
+          <span class="pl-clock" id="black-clock" hidden></span>
           <span class="turn-pulse" aria-hidden="true"></span>
         </div>
         <div class="player" id="pl-white">
@@ -47,6 +48,7 @@
             <div class="pl-name" id="white-name" data-i18n="whiteDefault">White</div>
             <div class="pl-meta" id="white-meta"></div>
           </div>
+          <span class="pl-clock" id="white-clock" hidden></span>
           <span class="turn-pulse" aria-hidden="true"></span>
         </div>
       </div>
@@ -122,6 +124,7 @@
     <aside class="side">
       <div class="match-dock host-only">
         <button id="m-start" class="primary" data-i18n="btnStart">Start match</button>
+        <button id="m-continue" class="primary-soft" data-i18n="btnContinueMatch" data-i18n-title="titleContinueMatch" title="Continue remaining games without clearing results" hidden>Continue</button>
         <button id="m-pause" data-i18n="btnPause">Pause</button>
         <button id="m-resume" data-i18n="btnResume">Resume</button>
         <button id="m-stop" class="danger" data-i18n="btnStop">Stop</button>
@@ -140,6 +143,7 @@
         </button>
         <button class="tab" type="button" role="tab" data-tab="log" aria-selected="false">
           <span data-i18n="tabLog">Log</span>
+          <span id="tab-chat-unread" class="tab-pill unread" hidden>0</span>
         </button>
       </nav>
 
@@ -163,6 +167,11 @@
                 <label for="my-url" data-i18n="lblBridge">Bridge</label>
                 <input id="my-url" data-persist value="ws://127.0.0.1:8765" spellcheck="false">
                 <button id="my-connect" data-i18n="btnConnect">Connect</button>
+              </div>
+              <div class="row preset-row">
+                <select id="my-preset" class="preset-select" aria-label="Bridge presets"></select>
+                <button id="my-preset-save" class="mini-btn" type="button" data-i18n="btnPresetSave">Save</button>
+                <button id="my-preset-del" class="mini-btn danger" type="button" data-i18n="btnPresetDel">Delete</button>
               </div>
               <div class="hint" id="my-status" data-i18n-html="myStatusDefaultHtml">Not connected. Start <code>bridge/gtp_bridge.py</code> first.</div>
             </div>
@@ -224,10 +233,25 @@
                 <input id="b-url" data-persist value="ws://127.0.0.1:8766" spellcheck="false">
                 <button id="b-connect" data-i18n="btnConnect">Connect</button>
               </div>
+              <div class="row preset-row">
+                <select id="b-preset" class="preset-select" aria-label="Bridge B presets"></select>
+                <button id="b-preset-save" class="mini-btn" type="button" data-i18n="btnPresetSave">Save</button>
+                <button id="b-preset-del" class="mini-btn danger" type="button" data-i18n="btnPresetDel">Delete</button>
+              </div>
               <div class="hint" id="b-status" data-i18n="bStatusDefault">Not connected.</div>
             </div>
             <div class="hint" id="b-remote-status"></div>
             <div class="grid">
+              <label><span data-i18n="lblRules">Rules</span> <select id="cfg-rules" data-persist>
+                <option value="chinese" data-i18n="optRuleChinese">Chinese (area, 7.5)</option>
+                <option value="japanese" data-i18n="optRuleJapanese">Japanese (territory, 6.5)</option>
+              </select></label>
+              <label><span data-i18n="lblHandicap">Handicap</span> <select id="cfg-handicap" data-persist>
+                <option value="0" data-i18n="optHandicapNone">Even (0)</option>
+                <option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                <option value="5">5</option><option value="6">6</option><option value="7">7</option>
+                <option value="8">8</option><option value="9">9</option>
+              </select></label>
               <label><span data-i18n="lblBoard">Board</span> <select id="cfg-size" data-persist>
                 <option value="19">19×19</option><option value="13">13×13</option><option value="9">9×9</option>
               </select></label>
@@ -238,11 +262,37 @@
                 <option value="simple" data-i18n="optKoSim">simple ko</option>
               </select></label>
               <label><span data-i18n="lblGames">Games</span> <input id="cfg-games" data-persist type="number" min="1" max="1000" value="10"></label>
-              <label><span data-i18n="lblTime">Sec / move</span> <input id="cfg-time" data-persist type="number" min="0" step="0.5" value="10" title="0 = unlimited; engines that exceed it lose on time" data-i18n-title="titleTime"></label>
+              <label><span data-i18n="lblClockMode">Clock</span> <select id="cfg-clock-mode" data-persist>
+                <option value="fixed" data-i18n="optClockFixed">Fixed sec / move</option>
+                <option value="byoyomi" data-i18n="optClockByo">Main + Byo-yomi</option>
+              </select></label>
+              <label id="wrap-fixed-time"><span data-i18n="lblTime">Sec / move</span> <input id="cfg-time" data-persist type="number" min="0" step="0.5" value="10" title="0 = unlimited; engines that exceed it lose on time" data-i18n-title="titleTime"></label>
+              <label id="wrap-main-time" hidden><span data-i18n="lblMainTime">Main min</span> <input id="cfg-main-min" data-persist type="number" min="0" max="180" step="0.5" value="5"></label>
+              <label id="wrap-byo-sec" hidden><span data-i18n="lblByoSec">Byo-yomi s</span> <input id="cfg-byo-sec" data-persist type="number" min="5" max="300" step="5" value="30"></label>
+              <label id="wrap-byo-periods" hidden><span data-i18n="lblByoPeriods">Periods</span> <input id="cfg-byo-periods" data-persist type="number" min="1" max="20" value="3"></label>
               <label><span data-i18n="lblMaxMoves">Max moves</span> <input id="cfg-maxmoves" data-persist type="number" min="0" value="0" title="0 = 2 x board points; then scored as is" data-i18n-title="titleMaxMoves"></label>
               <label><span data-i18n="lblDelay">Delay ms</span> <input id="cfg-delay" data-persist type="number" min="0" step="100" value="0" title="pause after each move, for watching" data-i18n-title="titleDelay"></label>
               <label class="check"><input type="checkbox" id="cfg-alternate" data-persist checked> <span data-i18n="chkAlternate">alternate colors</span></label>
             </div>
+            <details class="advanced">
+              <summary data-i18n="advBook">Opening book (multi-game variety)</summary>
+              <div class="row">
+                <select id="cfg-book-mode" data-persist>
+                  <option value="none" data-i18n="optBookNone">None (empty board)</option>
+                  <option value="builtin" data-i18n="optBookBuiltin">Built-in balanced openings</option>
+                  <option value="custom" data-i18n="optBookCustom">Custom SGF / move list</option>
+                </select>
+                <label class="check"><input type="checkbox" id="cfg-book-swap" data-persist checked> <span data-i18n="chkBookSwap">pair colors</span></label>
+              </div>
+              <div id="book-custom-box" hidden>
+                <div class="row">
+                  <input id="book-file" type="file" accept=".sgf,.txt" hidden>
+                  <button id="book-load-file" class="mini-btn" type="button" data-i18n="btnBookLoad">Load file</button>
+                  <span class="hint" id="book-status"></span>
+                </div>
+                <textarea id="cfg-book-text" data-persist rows="3" spellcheck="false" placeholder="Q16 D4 Q4 D16&#10;Q16 D16 Q4 D4"></textarea>
+              </div>
+            </details>
             <div class="row">
               <label for="ref-url" data-i18n="lblReferee">Analyzer</label>
               <input id="ref-url" data-persist placeholder="optional bridge for scoring & live analysis" data-i18n-placeholder="phReferee" spellcheck="false">
@@ -344,6 +394,16 @@
       </div>
 
       <div class="tab-pane" id="pane-log" data-pane="log">
+        <section class="card chat-card" id="card-chat">
+          <h2 data-i18n="cardChat">Room Chat</h2>
+          <div id="chat-messages" class="chat-messages">
+            <div class="chat-empty" data-i18n="chatEmpty">Join or create a room to chat with peers.</div>
+          </div>
+          <form id="chat-form" class="chat-form">
+            <input id="chat-input" maxlength="240" autocomplete="off" placeholder="Send a message..." data-i18n-placeholder="phChatInput">
+            <button id="chat-send" class="primary-soft" type="submit" data-i18n="btnChatSend">Send</button>
+          </form>
+        </section>
         <section class="card log-card" id="card-log">
           <h2 data-i18n="cardLog">Log</h2>
           <pre id="log"></pre>

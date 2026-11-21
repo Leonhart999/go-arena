@@ -8,6 +8,42 @@ export const PASS = -1;
 export const GTP_COLS = "ABCDEFGHJKLMNOPQRSTUVWXYZ"; // GTP skips the letter I
 export const SGF_COLS = "abcdefghijklmnopqrstuvwxyz";
 export const KO_RULES = ["simple", "positional", "situational"];
+export const RULE_PRESETS = {
+  chinese: { komi: 7.5, koRule: "positional", scoring: "area", sgfRule: "Chinese" },
+  japanese: { komi: 6.5, koRule: "simple", scoring: "territory", sgfRule: "Japanese" },
+};
+
+// Standard star-point handicap placements (GTP coordinates) for 19x19, 13x13, and 9x9.
+export function handicapVertices(size, count) {
+  const n = Math.max(0, Math.min(9, Math.round(Number(count) || 0)));
+  if (n < 2) return [];
+  if (size !== 19 && size !== 13 && size !== 9) return [];
+  const edge = size >= 13 ? 3 : 2;
+  const far = size - 1 - edge;
+  const mid = (size - 1) / 2;
+  const gtp = (x, y) => `${GTP_COLS[x]}${size - y}`;
+  // Standard order: top-right, bottom-left, bottom-right, top-left, center, left, right, top, bottom
+  const tr = gtp(far, edge);
+  const bl = gtp(edge, far);
+  const br = gtp(far, far);
+  const tl = gtp(edge, edge);
+  const c = gtp(mid, mid);
+  const ml = gtp(edge, mid);
+  const mr = gtp(far, mid);
+  const mt = gtp(mid, edge);
+  const mb = gtp(mid, far);
+  const table = {
+    2: [tr, bl],
+    3: [tr, bl, br],
+    4: [tr, bl, br, tl],
+    5: [tr, bl, br, tl, c],
+    6: [tr, bl, br, tl, ml, mr],
+    7: [tr, bl, br, tl, ml, mr, c],
+    8: [tr, bl, br, tl, ml, mr, mt, mb],
+    9: [tr, bl, br, tl, ml, mr, mt, mb, c],
+  };
+  return table[n] || [];
+}
 
 export const other = (color) => BLACK + WHITE - color;
 export const colorLetter = (color) => (color === BLACK ? "B" : "W");
@@ -227,6 +263,60 @@ export class Board {
     }
     return { black, white, owner };
   }
+
+  // Japanese-style territory count (no komi): empty enclosed points + captures + dead stones removed.
+  // Note: captures[BLACK] counts White stones captured by Black. Dead White stones add to Black's
+  // prisoners and their intersections become empty territory; dead Black stones add to White's.
+  territoryScore(deadSet = null) {
+    const n = this.stones.length;
+    const dead = deadSet ? (deadSet instanceof Set ? deadSet : new Set(deadSet)) : null;
+    const owner = new Uint8Array(n);
+    const seen = new Uint8Array(n);
+    let deadBlack = 0;
+    let deadWhite = 0;
+    if (dead) {
+      for (const p of dead) {
+        if (this.stones[p] === BLACK) deadBlack++;
+        else if (this.stones[p] === WHITE) deadWhite++;
+      }
+    }
+    const eff = (p) => (dead && dead.has(p) ? EMPTY : this.stones[p]);
+    let blackTerr = 0;
+    let whiteTerr = 0;
+    for (let i = 0; i < n; i++) {
+      const s = eff(i);
+      if (s !== EMPTY) {
+        owner[i] = s;
+        continue;
+      }
+      if (seen[i]) continue;
+      const region = [];
+      let borders = 0;
+      const stack = [i];
+      seen[i] = 1;
+      while (stack.length) {
+        const p = stack.pop();
+        region.push(p);
+        for (const q of this.nbrs[p]) {
+          const t = eff(q);
+          if (t === EMPTY) {
+            if (!seen[q]) {
+              seen[q] = 1;
+              stack.push(q);
+            }
+          } else borders |= t;
+        }
+      }
+      if (borders === BLACK || borders === WHITE) {
+        for (const p of region) owner[p] = borders;
+        if (borders === BLACK) blackTerr += region.length;
+        else whiteTerr += region.length;
+      }
+    }
+    const black = blackTerr + this.captures[BLACK] + deadWhite;
+    const white = whiteTerr + this.captures[WHITE] + deadBlack;
+    return { black, white, blackTerr, whiteTerr, owner };
+  }
 }
 
 // One game in progress: board plus move list, with strict color alternation.
@@ -265,6 +355,12 @@ export class GameState {
   // Black minus white by Tromp-Taylor area count, komi included.
   trompTaylor(deadSet = null) {
     const { black, white, owner } = this.board.areaScore(deadSet);
+    return { black, white, owner, diff: black - white - this.komi };
+  }
+
+  // Black minus white by Japanese territory count, komi included.
+  japaneseScore(deadSet = null) {
+    const { black, white, owner } = this.board.territoryScore(deadSet);
     return { black, white, owner, diff: black - white - this.komi };
   }
 }

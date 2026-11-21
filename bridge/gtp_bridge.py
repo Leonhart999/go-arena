@@ -193,7 +193,8 @@ class GtpProcess:
         self.cur_size: int | None = None
         self.cur_komi: float | None = None
         self.cur_moves: list[list[str]] = []
-        self.cur_time: float | None = None
+        self.cur_time: object = None
+        self.cur_rules: str | None = None
 
     def _spawn(self) -> None:
         if isinstance(self.command, list):
@@ -218,6 +219,7 @@ class GtpProcess:
         self.cur_komi = None
         self.cur_moves = []
         self.cur_time = None
+        self.cur_rules = None
         self.commands = set()
 
         name = self._try_send("name", timeout=180.0) or "GTP Engine"
@@ -304,8 +306,22 @@ class GtpProcess:
         except GtpError:
             return None
 
-    def _sync_state(self, size: int, komi: float, moves: list[list[str]], time_per_move: float) -> None:
+    def _sync_state(
+        self,
+        size: int,
+        komi: float,
+        moves: list[list[str]],
+        time_per_move: float,
+        clock: dict | None = None,
+        rules: str | None = None,
+    ) -> None:
         norm_moves = [[str(c).upper(), str(v)] for c, v in moves]
+        norm_rules = str(rules).strip().lower() if rules else None
+        if norm_rules and norm_rules != self.cur_rules and "kata-set-rules" in self.commands:
+            if norm_rules in ("chinese", "japanese", "tromp-taylor"):
+                self._try_send(f"kata-set-rules {norm_rules}", timeout=10.0)
+            self.cur_rules = norm_rules
+
         prefix_ok = (
             self.cur_size == size
             and self.cur_komi == komi
@@ -326,37 +342,70 @@ class GtpProcess:
             self._send(f"play {color} {vertex}", timeout=30.0)
             self.cur_moves.append([color, vertex])
 
-        if "time_settings" in self.commands and time_per_move != self.cur_time:
-            if time_per_move > 0:
-                sec = max(1, int(time_per_move))
-                self._try_send(f"time_settings 0 {sec} 1", timeout=10.0)
-            elif self.cur_time is not None:
-                self._try_send("time_settings 0 0 0", timeout=10.0)
-            self.cur_time = time_per_move
+        if clock and clock.get("mode") == "byoyomi":
+            main_s = max(0, int(clock.get("mainTime", 0)))
+            byo_s = max(1, int(clock.get("byoTime", 30)))
+            periods = max(1, int(clock.get("byoPeriods", 3)))
+            sig = ("byoyomi", main_s, byo_s, periods)
+            if sig != self.cur_time:
+                if "kgs-time_settings" in self.commands:
+                    self._try_send(f"kgs-time_settings byoyomi {main_s} {byo_s} {periods}", timeout=10.0)
+                elif "time_settings" in self.commands:
+                    self._try_send(f"time_settings {main_s} {byo_s} 1", timeout=10.0)
+                self.cur_time = sig
+        elif "time_settings" in self.commands:
+            sig = ("fixed", time_per_move)
+            if sig != self.cur_time:
+                if time_per_move > 0:
+                    sec = max(1, int(time_per_move))
+                    self._try_send(f"time_settings 0 {sec} 1", timeout=10.0)
+                elif self.cur_time is not None:
+                    self._try_send("time_settings 0 0 0", timeout=10.0)
+                self.cur_time = sig
 
-    def genmove(self, size: int, komi: float, color: str, moves: list[list[str]], time_per_move: float) -> str:
+    def genmove(
+        self,
+        size: int,
+        komi: float,
+        color: str,
+        moves: list[list[str]],
+        time_per_move: float,
+        clock: dict | None = None,
+        rules: str | None = None,
+    ) -> str:
         self._cancel_analyze.set()
         with self._lock:
             if self.proc is None or self.proc.poll() is not None:
                 self._spawn()
-            self._sync_state(size, komi, moves, time_per_move)
+            self._sync_state(size, komi, moves, time_per_move, clock=clock, rules=rules)
             c = str(color).upper()
-            if time_per_move > 0 and "time_left" in self.commands:
-                sec = max(1, int(time_per_move))
-                self._try_send(f"time_left {c} {sec} 1", timeout=10.0)
-            think_timeout = max(30.0, time_per_move + 30.0) if time_per_move > 0 else 600.0
+            if clock and clock.get("mode") == "byoyomi":
+                if "time_left" in self.commands:
+                    sec = max(0, int(clock.get("timeLeftSec", 1)))
+                    periods = max(0, int(clock.get("periodsLeft", 0)))
+                    self._try_send(f"time_left {c} {sec} {periods}", timeout=10.0)
+                budget = max(
+                    30.0,
+                    float(clock.get("timeLeftSec", 30)) + float(clock.get("byoTime", 30)) * max(1, int(clock.get("periodsLeft", 1))) + 30.0,
+                )
+                think_timeout = min(3600.0, budget)
+            else:
+                if time_per_move > 0 and "time_left" in self.commands:
+                    sec = max(1, int(time_per_move))
+                    self._try_send(f"time_left {c} {sec} 1", timeout=10.0)
+                think_timeout = max(30.0, time_per_move + 30.0) if time_per_move > 0 else 600.0
             move = self._send(f"genmove {c}", timeout=think_timeout)
             mv = move.strip()
             if mv.lower() != "resign":
                 self.cur_moves.append([c, mv])
             return mv
 
-    def final_score(self, size: int, komi: float, moves: list[list[str]]) -> str:
+    def final_score(self, size: int, komi: float, moves: list[list[str]], rules: str | None = None) -> str:
         self._cancel_analyze.set()
         with self._lock:
             if self.proc is None or self.proc.poll() is not None:
                 self._spawn()
-            self._sync_state(size, komi, moves, 0.0)
+            self._sync_state(size, komi, moves, 0.0, rules=rules)
             return self._send("final_score", timeout=60.0)
 
     def cancel_analyze(self) -> None:
@@ -665,6 +714,8 @@ async def handle_client(
                     str(msg["color"]),
                     list(msg.get("moves", [])),
                     float(msg.get("timePerMove", 0)),
+                    msg.get("clock") if isinstance(msg.get("clock"), dict) else None,
+                    str(msg["rules"]) if msg.get("rules") else None,
                 )
                 await send_json({"id": req_id, "ok": True, "move": move})
             elif op == "final_score":
@@ -673,6 +724,7 @@ async def handle_client(
                     int(msg["size"]),
                     float(msg["komi"]),
                     list(msg.get("moves", [])),
+                    str(msg["rules"]) if msg.get("rules") else None,
                 )
                 await send_json({"id": req_id, "ok": True, "score": score})
             elif op == "analyze":

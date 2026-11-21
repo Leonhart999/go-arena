@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { BLACK, WHITE, PASS, Board, GameState, IllegalMove, formatScore } from "../web/js/go.js";
+import { BLACK, WHITE, PASS, Board, GameState, IllegalMove, RULE_PRESETS, formatScore, handicapVertices } from "../web/js/go.js";
 import { wilson, eloFromScore, los, summarize } from "../web/js/stats.js";
 import { recordToSgf, recordsToCsv, parseSgf, parseSgfCollection } from "../web/js/sgf.js";
 import { readFileSync } from "node:fs";
@@ -12,6 +12,8 @@ import { DEFAULT_ICE, parseIceServers, encodeIceParam, decodeIceParam } from "..
 import { detectBlunders, formatScoreLead, stripForRecord } from "../web/js/analysis.js";
 import { computeScoreCeiling } from "../web/js/chart.js";
 import { SoundEffects } from "../web/js/audio.js";
+import { GameClock, formatClockMs, projectClockSnapshot } from "../web/js/clock.js";
+import { BUILTIN_OPENINGS, loadBridgePresets, parseOpeningBook, saveBridgePresets } from "../web/js/presets.js";
 
 test("GTP coordinates skip I and round-trip", () => {
   const b = new Board(19);
@@ -393,4 +395,86 @@ test("areaScore with dead stones, MatchRunner resume from prefix, undo, and dead
   // All 9 points belong to Black minus 0.5 komi = B+8.5
   assert.equal(runner.records[0].result, "B+8.5");
   assert.equal(runner.records[0].winnerSeat, "A");
+});
+
+test("Phase 3: byo-yomi clock, Japanese territory scoring, handicap, opening book, and presets", async () => {
+  // 1) Byo-yomi clock consumption & projection
+  const clk = new GameClock({ clockMode: "byoyomi", mainTimeSec: 60, byoyomiSec: 30, byoyomiPeriods: 3 });
+  assert.equal(clk.isByoyomi, true);
+  assert.equal(formatClockMs(65000), "1:05");
+  // Spend 40s of main time -> 20s left
+  assert.equal(clk.consume("B", 40000).flag, false);
+  assert.equal(clk.sides.B.mainMs, 20000);
+  assert.equal(clk.sides.B.periods, 3);
+  // Spend 45s -> burns remaining 20s main + 25s (< 30s period), periods stay 3
+  assert.equal(clk.consume("B", 45000).flag, false);
+  assert.equal(clk.sides.B.mainMs, 0);
+  assert.equal(clk.sides.B.periods, 3);
+  // Spend 35s in byo-yomi -> burns 1 period (2 left)
+  assert.equal(clk.consume("B", 35000).flag, false);
+  assert.equal(clk.sides.B.periods, 2);
+  // Snapshot projection during active turn
+  const proj = projectClockSnapshot(clk.snapshot(), "B", 24000);
+  assert.equal(proj.inByo, true);
+  assert.equal(proj.periods, 2);
+  assert.equal(proj.curPeriodMs, 6000);
+  assert.equal(proj.low, true);
+  // Burn remaining 2 periods -> flag on time
+  assert.equal(clk.consume("B", 65000).flag, true);
+
+  // 2) Handicap vertices & Japanese territory scoring
+  assert.deepEqual(handicapVertices(19, 2), ["Q16", "D4"]);
+  assert.equal(handicapVertices(19, 9).length, 9);
+  assert.deepEqual(handicapVertices(9, 4), ["G7", "C3", "G3", "C7"]);
+  assert.equal(RULE_PRESETS.japanese.komi, 6.5);
+
+  const g = new GameState(3, 0.5, "simple");
+  // Black plays B3, B2, B1 (enclosing A3, A2, A1 = 3 empty territory)
+  g.apply(BLACK, "B3");
+  g.apply(WHITE, "C3");
+  g.apply(BLACK, "B2");
+  g.apply(WHITE, "C2");
+  g.apply(BLACK, "B1");
+  // Black captures nothing, White has no territory; if C3+C2 marked dead -> Black gets 3 + 3 empty + 2 dead = 8 pts (wait: C1 also becomes Black territory -> 6 empty + 2 dead = 8? No: A1-A3 (3) + C1-C3 (3) = 6 empty + 2 dead White = 8)
+  const dead = new Set([g.board.fromGtp("C3"), g.board.fromGtp("C2")]);
+  const jp = g.japaneseScore(dead);
+  assert.equal(jp.black, 8);
+  assert.equal(jp.white, 0);
+  assert.equal(jp.diff, 7.5);
+
+  // 3) Opening book parser (plain text + SGF) & bridge preset storage
+  assert.ok(BUILTIN_OPENINGS[19].length >= 4);
+  const txtBook = parseOpeningBook("Q16 D4 Q4 D16\n# comment\nQ16 D16 Q4 D4", 19);
+  assert.equal(txtBook.length, 2);
+  assert.deepEqual(txtBook[0], [["B", "Q16"], ["W", "D4"], ["B", "Q4"], ["W", "D16"]]);
+
+  const sgfBook = parseOpeningBook("(;GM[1]SZ[9];B[ee];W[cc])(;GM[1]SZ[9];B[fe];W[de])", 9);
+  assert.equal(sgfBook.length, 2);
+  assert.deepEqual(sgfBook[0], [["B", "E5"], ["W", "C7"]]);
+
+  const mem = new Map();
+  const storage = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v) };
+  saveBridgePresets([{ name: "KataGo", url: "ws://127.0.0.1:8765" }], storage);
+  assert.deepEqual(loadBridgePresets(storage), [{ name: "KataGo", url: "ws://127.0.0.1:8765" }]);
+
+  // 4) MatchRunner with handicap + opening book + continuation offset
+  const passBot = (label) => ({ kind: "engine", label, requestMove: () => Promise.resolve("pass"), cancel() {} });
+  const runner = new MatchRunner(
+    {
+      size: 9,
+      komi: 0.5,
+      rulePreset: "japanese",
+      handicap: 2,
+      games: 2,
+      startPlayed: 1,
+      startRecordIndex: 1,
+      timePerMove: 0,
+    },
+    { A: passBot("A"), B: passBot("B") },
+  );
+  await runner.run();
+  assert.equal(runner.records.length, 1);
+  assert.equal(runner.records[0].index, 1);
+  // Handicap 2 placed G7 & C3 as Black moves before White/Black passed
+  assert.deepEqual(runner.records[0].moves.slice(0, 2).map(([c, v]) => `${c}:${v}`), ["B:G7", "B:C3"]);
 });
